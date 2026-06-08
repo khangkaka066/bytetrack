@@ -1,0 +1,18 @@
+# Kaggle already ships PyTorch, torchvision, NumPy, SciPy, OpenCV and many
+# scientific packages. This file installs the ByteTrack-specific pieces without
+# forcing old ONNX wheels from the original requirements.txt.
+loguru
+scikit-image
+tqdm
+Pillow
+thop
+ninja
+tabulate
+tensorboard
+lap
+motmetrics
+filterpy
+h5py
+cython
+cython-bbox
+pycocotools
