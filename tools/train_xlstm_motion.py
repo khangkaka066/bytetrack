@@ -1,12 +1,18 @@
 import argparse
 import glob
 import os
+import sys
 import random
 from collections import defaultdict, deque
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
+
+FILE = os.path.abspath(__file__)
+ROOT = os.path.dirname(os.path.dirname(FILE))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 from yolox.tracker.kalman_filter import KalmanFilter
 from yolox.tracker.xlstm_motion import XlstmMotionResidual
