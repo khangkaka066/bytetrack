@@ -251,6 +251,13 @@ python3 tools/interpolation.py
 ```
 Submit the txt files to [MOTChallenge](https://motchallenge.net/) website and you can get 77+ MOTA (For higher MOTA, you need to carefully tune the test image size and high score detection threshold of each sequence).
 
+### xLSTM motion residual
+
+This fork can optionally refine ByteTrack Kalman prediction with an
+NX-AI/xLSTM motion residual model. See
+[docs/xlstm_motion_kalman.md](docs/xlstm_motion_kalman.md) for training data
+format, loss, checkpoint format, and inference commands.
+
 ## Applying BYTE to other trackers
 
 See [tutorials](https://github.com/ifzhang/ByteTrack/tree/main/tutorials).

@@ -87,6 +87,17 @@ def make_parser():
     )
     parser.add_argument('--min_box_area', type=float, default=10, help='filter out tiny boxes')
     parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
+    parser.add_argument("--xlstm_motion_ckpt", type=str, default=None, help="optional xLSTM motion residual checkpoint")
+    parser.add_argument("--xlstm_history_len", type=int, default=16, help="xLSTM motion history length")
+    parser.add_argument("--xlstm_input_dim", type=int, default=12, help="xLSTM motion history feature dimension")
+    parser.add_argument("--xlstm_min_history", type=int, default=16, help="minimum history length before applying xLSTM")
+    parser.add_argument("--xlstm_embedding_dim", type=int, default=128, help="xLSTM motion embedding dimension")
+    parser.add_argument("--xlstm_num_blocks", type=int, default=4, help="number of xLSTM blocks")
+    parser.add_argument("--xlstm_num_heads", type=int, default=4, help="number of xLSTM heads")
+    parser.add_argument("--xlstm_backend", type=str, default="cuda", help="xLSTM sLSTM backend")
+    parser.add_argument("--xlstm_device", type=str, default=None, help="device for xLSTM motion model")
+    parser.add_argument("--xlstm_covariance_scale", type=float, default=1.0, help="scale for log_var covariance inflation")
+    parser.add_argument("--xlstm_max_abs_residual", type=float, default=256.0, help="clip xLSTM residual magnitude")
     return parser
 
 

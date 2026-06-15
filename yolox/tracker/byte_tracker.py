@@ -7,11 +7,17 @@ import torch
 import torch.nn.functional as F
 
 from .kalman_filter import KalmanFilter
+from .xlstm_motion import XlstmMotionPredictor
 from yolox.tracker import matching
 from .basetrack import BaseTrack, TrackState
 
+
+DEFAULT_XLSTM_HISTORY_LEN = 16
+
+
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
+    motion_history_len = DEFAULT_XLSTM_HISTORY_LEN
     def __init__(self, tlwh, score):
 
         # wait activate
@@ -22,6 +28,9 @@ class STrack(BaseTrack):
 
         self.score = score
         self.tracklet_len = 0
+        self.motion_history = deque(maxlen=STrack.motion_history_len)
+        self.missing_count = 0
+        self._last_motion_frame = None
 
     def predict(self):
         mean_state = self.mean.copy()
@@ -30,7 +39,7 @@ class STrack(BaseTrack):
         self.mean, self.covariance = self.kalman_filter.predict(mean_state, self.covariance)
 
     @staticmethod
-    def multi_predict(stracks):
+    def multi_predict(stracks, motion_predictor=None):
         if len(stracks) > 0:
             multi_mean = np.asarray([st.mean.copy() for st in stracks])
             multi_covariance = np.asarray([st.covariance for st in stracks])
@@ -38,6 +47,10 @@ class STrack(BaseTrack):
                 if st.state != TrackState.Tracked:
                     multi_mean[i][7] = 0
             multi_mean, multi_covariance = STrack.shared_kalman.multi_predict(multi_mean, multi_covariance)
+            if motion_predictor is not None:
+                multi_mean, multi_covariance = motion_predictor.refine(
+                    stracks, multi_mean, multi_covariance
+                )
             for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
                 stracks[i].mean = mean
                 stracks[i].covariance = cov
@@ -55,6 +68,7 @@ class STrack(BaseTrack):
         # self.is_activated = True
         self.frame_id = frame_id
         self.start_frame = frame_id
+        self._append_motion_history(frame_id, self.score, is_missing=False)
 
     def re_activate(self, new_track, frame_id, new_id=False):
         self.mean, self.covariance = self.kalman_filter.update(
@@ -67,6 +81,7 @@ class STrack(BaseTrack):
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
+        self._append_motion_history(frame_id, self.score, is_missing=False)
 
     def update(self, new_track, frame_id):
         """
@@ -86,6 +101,41 @@ class STrack(BaseTrack):
         self.is_activated = True
 
         self.score = new_track.score
+        self._append_motion_history(frame_id, self.score, is_missing=False)
+
+    def append_missing_motion(self, frame_id):
+        if self.mean is None or self._last_motion_frame == frame_id:
+            return
+        self.missing_count += 1
+        self._append_motion_history(frame_id, 0.0, is_missing=True)
+
+    def _append_motion_history(self, frame_id, confidence, is_missing):
+        if self.mean is None:
+            return
+        delta_t = 1.0
+        if self._last_motion_frame is not None:
+            delta_t = max(1.0, float(frame_id - self._last_motion_frame))
+        if not is_missing:
+            self.missing_count = 0
+        feature = np.asarray(
+            [
+                self.mean[0],
+                self.mean[1],
+                self.mean[2],
+                self.mean[3],
+                self.mean[4],
+                self.mean[5],
+                self.mean[6],
+                self.mean[7],
+                delta_t,
+                1.0 if is_missing else 0.0,
+                float(self.missing_count),
+                float(confidence),
+            ],
+            dtype=np.float32,
+        )
+        self.motion_history.append(feature)
+        self._last_motion_frame = frame_id
 
     @property
     # @jit(nopython=True)
@@ -155,6 +205,8 @@ class BYTETracker(object):
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
+        STrack.motion_history_len = int(getattr(args, "xlstm_history_len", DEFAULT_XLSTM_HISTORY_LEN))
+        self.motion_predictor = XlstmMotionPredictor(args)
 
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
@@ -203,7 +255,7 @@ class BYTETracker(object):
         ''' Step 2: First association, with high score detection boxes'''
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
         # Predict the current location with KF
-        STrack.multi_predict(strack_pool)
+        STrack.multi_predict(strack_pool, self.motion_predictor)
         dists = matching.iou_distance(strack_pool, detections)
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
@@ -243,8 +295,13 @@ class BYTETracker(object):
         for it in u_track:
             track = r_tracked_stracks[it]
             if not track.state == TrackState.Lost:
+                track.append_missing_motion(self.frame_id)
                 track.mark_lost()
                 lost_stracks.append(track)
+
+        for track in strack_pool:
+            if track.state == TrackState.Lost:
+                track.append_missing_motion(self.frame_id)
 
         '''Deal with unconfirmed tracks, usually tracks with only one beginning frame'''
         detections = [detections[i] for i in u_detection]
