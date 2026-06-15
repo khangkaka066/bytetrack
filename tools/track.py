@@ -20,9 +20,13 @@ import argparse
 import random
 import warnings
 import glob
+import numpy as np
 import motmetrics as mm
 from collections import OrderedDict
 from pathlib import Path
+
+if not hasattr(np, "asfarray"):
+    np.asfarray = lambda a, dtype=float: np.asarray(a, dtype=dtype)
 
 
 def make_parser():
