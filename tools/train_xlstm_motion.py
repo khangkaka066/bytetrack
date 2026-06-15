@@ -30,6 +30,7 @@ def make_parser():
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--backend", type=str, default="cuda")
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--data-parallel", action="store_true", help="use all visible CUDA GPUs with DataParallel")
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -222,6 +223,10 @@ def evaluate(model, loader, device):
     return total_loss / max(total_count, 1), total_mae / max(total_count, 1)
 
 
+def unwrap_model(model):
+    return model.module if isinstance(model, torch.nn.DataParallel) else model
+
+
 def main():
     args = make_parser().parse_args()
     random.seed(args.seed)
@@ -286,6 +291,17 @@ def main():
         num_heads=args.num_heads,
         backend=args.backend,
     ).to(device)
+
+    if args.data_parallel:
+        if device.type != "cuda":
+            raise ValueError("--data-parallel requires a CUDA device")
+        gpu_count = torch.cuda.device_count()
+        if gpu_count < 2:
+            print("--data-parallel requested, but only {} CUDA GPU is visible".format(gpu_count))
+        else:
+            model = torch.nn.DataParallel(model)
+            print("Using DataParallel on {} CUDA GPUs".format(gpu_count))
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     best_val_loss = float("inf")
@@ -319,17 +335,20 @@ def main():
             )
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                best_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+                best_state = {
+                    key: value.detach().cpu()
+                    for key, value in unwrap_model(model).state_dict().items()
+                }
         else:
             print("epoch {:03d} train_loss {:.6f}".format(epoch, train_loss))
 
     if best_state is not None:
-        model.load_state_dict(best_state)
+        unwrap_model(model).load_state_dict(best_state)
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     torch.save(
         {
-            "model": model.state_dict(),
+            "model": unwrap_model(model).state_dict(),
             "history_len": args.history_len,
             "input_dim": args.input_dim,
             "embedding_dim": args.embedding_dim,
