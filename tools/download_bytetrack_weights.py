@@ -13,6 +13,10 @@ WEIGHTS = {
         "file_id": "1P4mY0Yyd3PPTybgZkjMYhFri88nTmJX5",
         "filename": "bytetrack_x_mot17.pth.tar",
     },
+    "mot17_m": {
+        "file_id": "11Zb0NN_Uu7JwUd9e6Nk8o2_EUfxWqsun",
+        "filename": "bytetrack_m_mot17.pth.tar",
+    },
 }
 
 
