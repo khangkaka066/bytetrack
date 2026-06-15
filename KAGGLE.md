@@ -107,6 +107,13 @@ If the checkpoint is also attached as a Kaggle Dataset:
 !cp /kaggle/input/bytetrack-weights/bytetrack_x_mot17.pth.tar pretrained/
 ```
 
+Or download the official ByteTrack ablation checkpoint directly from Google
+Drive when Kaggle internet is enabled:
+
+```python
+!python tools/download_bytetrack_weights.py --name ablation --output-dir pretrained
+```
+
 ### 3. Run MOT17 Test Tracking
 
 This runs on `datasets/mot/test` and writes result text files for MOTChallenge:
