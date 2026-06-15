@@ -1,8 +1,15 @@
 from loguru import logger
 
+import os
+import sys
 import torch
 import torch.backends.cudnn as cudnn
 from torch.nn.parallel import DistributedDataParallel as DDP
+
+FILE = os.path.abspath(__file__)
+ROOT = os.path.dirname(os.path.dirname(FILE))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 from yolox.core import launch
 from yolox.exp import get_exp
@@ -10,7 +17,6 @@ from yolox.utils import configure_nccl, fuse_model, get_local_rank, get_model_in
 from yolox.evaluators import MOTEvaluator
 
 import argparse
-import os
 import random
 import warnings
 import glob

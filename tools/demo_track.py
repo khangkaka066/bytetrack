@@ -1,11 +1,17 @@
 import argparse
 import os
 import os.path as osp
+import sys
 import time
 import cv2
 import torch
 
 from loguru import logger
+
+FILE = os.path.abspath(__file__)
+ROOT = os.path.dirname(os.path.dirname(FILE))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 from yolox.data.data_augment import preproc
 from yolox.exp import get_exp
