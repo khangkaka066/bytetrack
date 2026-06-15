@@ -33,6 +33,8 @@ def make_parser():
     parser.add_argument("--data-parallel", action="store_true", help="use all visible CUDA GPUs with DataParallel")
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--patience", type=int, default=20, help="early-stop epochs without validation improvement")
+    parser.add_argument("--min-delta", type=float, default=1e-4, help="minimum validation loss improvement")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--val-ratio", type=float, default=0.2)
@@ -227,6 +229,26 @@ def unwrap_model(model):
     return model.module if isinstance(model, torch.nn.DataParallel) else model
 
 
+def save_checkpoint(model, args, output, train_sequences, val_sequences, epoch, best_val_loss):
+    os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
+    torch.save(
+        {
+            "model": unwrap_model(model).state_dict(),
+            "history_len": args.history_len,
+            "input_dim": args.input_dim,
+            "embedding_dim": args.embedding_dim,
+            "num_blocks": args.num_blocks,
+            "num_heads": args.num_heads,
+            "backend": args.backend,
+            "epoch": epoch,
+            "best_val_loss": best_val_loss,
+            "train_sequences": [name for name, _ in train_sequences],
+            "val_sequences": [name for name, _ in val_sequences],
+        },
+        output,
+    )
+
+
 def main():
     args = make_parser().parse_args()
     random.seed(args.seed)
@@ -306,6 +328,7 @@ def main():
 
     best_val_loss = float("inf")
     best_state = None
+    epochs_without_improvement = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
@@ -333,32 +356,46 @@ def main():
                     epoch, train_loss, val_loss, val_mae
                 )
             )
-            if val_loss < best_val_loss:
+            if val_loss < best_val_loss - args.min_delta:
                 best_val_loss = val_loss
                 best_state = {
                     key: value.detach().cpu()
                     for key, value in unwrap_model(model).state_dict().items()
                 }
+                epochs_without_improvement = 0
+                save_checkpoint(
+                    model,
+                    args,
+                    args.output,
+                    train_sequences,
+                    val_sequences,
+                    epoch,
+                    best_val_loss,
+                )
+                print("saved best checkpoint to {}".format(args.output))
+            else:
+                epochs_without_improvement += 1
+                if args.patience > 0 and epochs_without_improvement >= args.patience:
+                    print(
+                        "early stopping after {} epochs without validation improvement".format(
+                            epochs_without_improvement
+                        )
+                    )
+                    break
         else:
             print("epoch {:03d} train_loss {:.6f}".format(epoch, train_loss))
 
     if best_state is not None:
         unwrap_model(model).load_state_dict(best_state)
 
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-    torch.save(
-        {
-            "model": unwrap_model(model).state_dict(),
-            "history_len": args.history_len,
-            "input_dim": args.input_dim,
-            "embedding_dim": args.embedding_dim,
-            "num_blocks": args.num_blocks,
-            "num_heads": args.num_heads,
-            "backend": args.backend,
-            "train_sequences": [name for name, _ in train_sequences],
-            "val_sequences": [name for name, _ in val_sequences],
-        },
+    save_checkpoint(
+        model,
+        args,
         args.output,
+        train_sequences,
+        val_sequences,
+        epoch,
+        best_val_loss,
     )
     print("Saved checkpoint to {}".format(args.output))
 
