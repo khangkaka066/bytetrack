@@ -37,6 +37,13 @@ def make_parser():
     parser.add_argument("--min-delta", type=float, default=1e-4, help="minimum validation loss improvement")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--split-mode",
+        type=str,
+        default="sequence",
+        choices=("sequence", "half"),
+        help="sequence: hold out whole sequences; half: train first half and validate second half of every sequence",
+    )
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=2)
@@ -105,6 +112,27 @@ def read_mot_gt(gt_path, class_id=1, min_vis=0.0):
     for rows in tracks.values():
         rows.sort(key=lambda item: item["frame"])
     return tracks
+
+
+def count_sequence_frames(sequence_path):
+    img_path = os.path.join(sequence_path, "img1")
+    images = glob.glob(os.path.join(img_path, "*.jpg"))
+    if images:
+        return len(images)
+    return 0
+
+
+def filter_tracks_by_frame(tracks, start_frame, end_frame):
+    filtered = {}
+    for track_id, rows in tracks.items():
+        selected = [
+            row
+            for row in rows
+            if row["frame"] >= start_frame and row["frame"] <= end_frame
+        ]
+        if selected:
+            filtered[track_id] = selected
+    return filtered
 
 
 def build_samples_for_track(track_rows, history_len):
@@ -189,7 +217,11 @@ def load_sequences(data_root, sequence_glob, class_id, min_vis):
             class_id=class_id,
             min_vis=min_vis,
         )
-        sequences.append((sequence_name, tracks))
+        num_frames = count_sequence_frames(sequence_path)
+        if num_frames == 0:
+            max_frame = max((row["frame"] for rows in tracks.values() for row in rows), default=0)
+            num_frames = max_frame
+        sequences.append((sequence_name, tracks, num_frames))
     return sequences
 
 
@@ -242,8 +274,9 @@ def save_checkpoint(model, args, output, train_sequences, val_sequences, epoch, 
             "backend": args.backend,
             "epoch": epoch,
             "best_val_loss": best_val_loss,
-            "train_sequences": [name for name, _ in train_sequences],
-            "val_sequences": [name for name, _ in val_sequences],
+            "split_mode": args.split_mode,
+            "train_sequences": [name for name, _, _ in train_sequences],
+            "val_sequences": [name for name, _, _ in val_sequences],
         },
         output,
     )
@@ -257,20 +290,34 @@ def main():
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     sequences = load_sequences(args.data_root, args.sequence_glob, args.class_id, args.min_vis)
-    random.Random(args.seed).shuffle(sequences)
 
-    val_count = int(round(len(sequences) * args.val_ratio))
-    if len(sequences) > 1:
-        val_count = min(max(val_count, 1), len(sequences) - 1)
+    if args.split_mode == "sequence":
+        random.Random(args.seed).shuffle(sequences)
+        val_count = int(round(len(sequences) * args.val_ratio))
+        if len(sequences) > 1:
+            val_count = min(max(val_count, 1), len(sequences) - 1)
+        else:
+            val_count = 0
+
+        val_sequences = sequences[:val_count]
+        train_sequences = sequences[val_count:]
     else:
-        val_count = 0
-
-    val_sequences = sequences[:val_count]
-    train_sequences = sequences[val_count:]
+        train_sequences = []
+        val_sequences = []
+        for sequence_name, tracks, num_frames in sequences:
+            midpoint = num_frames // 2
+            train_tracks = filter_tracks_by_frame(tracks, 1, midpoint)
+            val_tracks = filter_tracks_by_frame(tracks, midpoint + 1, num_frames)
+            train_sequences.append(
+                ("{}:first_half".format(sequence_name), train_tracks, midpoint)
+            )
+            val_sequences.append(
+                ("{}:second_half".format(sequence_name), val_tracks, num_frames - midpoint)
+            )
 
     def build_split(split_sequences):
         split_samples = []
-        for sequence_name, tracks in split_sequences:
+        for sequence_name, tracks, _ in split_sequences:
             sequence_samples = []
             for rows in tracks.values():
                 sequence_samples.extend(build_samples_for_track(rows, args.history_len))
@@ -278,8 +325,9 @@ def main():
             split_samples.extend(sequence_samples)
         return split_samples
 
-    print("Train sequences:", ", ".join(name for name, _ in train_sequences))
-    print("Val sequences:", ", ".join(name for name, _ in val_sequences) or "none")
+    print("Split mode:", args.split_mode)
+    print("Train sequences:", ", ".join(name for name, _, _ in train_sequences))
+    print("Val sequences:", ", ".join(name for name, _, _ in val_sequences) or "none")
     train_samples = build_split(train_sequences)
     val_samples = build_split(val_sequences) if val_sequences else []
     if not train_samples:
