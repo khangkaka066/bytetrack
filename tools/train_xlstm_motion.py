@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 FILE = os.path.abspath(__file__)
@@ -35,8 +36,22 @@ def make_parser():
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--patience", type=int, default=20, help="early-stop epochs without validation improvement")
     parser.add_argument("--min-delta", type=float, default=1e-4, help="minimum validation loss improvement")
+    parser.add_argument(
+        "--monitor",
+        type=str,
+        default="val_loss",
+        choices=("val_loss", "val_mae"),
+        help="metric used for best checkpoint and early stopping",
+    )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--residual-loss-weight",
+        type=float,
+        default=0.0,
+        help="extra SmoothL1 residual loss weight; use 0.5 or 1.0 to emphasize residual accuracy",
+    )
+    parser.add_argument("--residual-loss-beta", type=float, default=1.0, help="SmoothL1 beta for residual loss")
     parser.add_argument(
         "--split-mode",
         type=str,
@@ -238,30 +253,72 @@ def residual_nll_loss(pred_residual, pred_log_var, target_residual):
     return loss.mean() + 1e-4 * pred_log_var.pow(2).mean()
 
 
+def motion_loss(pred_residual, pred_log_var, target_residual, residual_loss_weight, residual_loss_beta):
+    nll_loss = residual_nll_loss(pred_residual, pred_log_var, target_residual)
+    residual_loss = F.smooth_l1_loss(
+        pred_residual,
+        target_residual,
+        beta=residual_loss_beta,
+    )
+    total_loss = nll_loss + residual_loss_weight * residual_loss
+    return total_loss, nll_loss, residual_loss
+
+
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, residual_loss_weight, residual_loss_beta):
     model.eval()
     total_loss = 0.0
+    total_nll = 0.0
+    total_residual_loss = 0.0
     total_mae = 0.0
+    total_mae_per_dim = torch.zeros(4, dtype=torch.float64)
     total_count = 0
     for history, target in loader:
         history = history.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
         pred_residual, pred_log_var = model(history)
-        loss = residual_nll_loss(pred_residual, pred_log_var, target)
-        mae = torch.abs(pred_residual - target).mean()
+        loss, nll_loss, residual_loss = motion_loss(
+            pred_residual,
+            pred_log_var,
+            target,
+            residual_loss_weight,
+            residual_loss_beta,
+        )
+        abs_error = torch.abs(pred_residual - target)
+        mae = abs_error.mean()
+        mae_per_dim = abs_error.mean(dim=0).detach().cpu().double()
         batch_size = history.size(0)
         total_loss += loss.item() * batch_size
+        total_nll += nll_loss.item() * batch_size
+        total_residual_loss += residual_loss.item() * batch_size
         total_mae += mae.item() * batch_size
+        total_mae_per_dim += mae_per_dim * batch_size
         total_count += batch_size
-    return total_loss / max(total_count, 1), total_mae / max(total_count, 1)
+    total_count = max(total_count, 1)
+    return (
+        total_loss / total_count,
+        total_nll / total_count,
+        total_residual_loss / total_count,
+        total_mae / total_count,
+        (total_mae_per_dim / total_count).tolist(),
+    )
 
 
 def unwrap_model(model):
     return model.module if isinstance(model, torch.nn.DataParallel) else model
 
 
-def save_checkpoint(model, args, output, train_sequences, val_sequences, epoch, best_val_loss):
+def save_checkpoint(
+    model,
+    args,
+    output,
+    train_sequences,
+    val_sequences,
+    epoch,
+    best_score,
+    best_val_loss,
+    best_val_mae,
+):
     os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
     torch.save(
         {
@@ -273,7 +330,12 @@ def save_checkpoint(model, args, output, train_sequences, val_sequences, epoch, 
             "num_heads": args.num_heads,
             "backend": args.backend,
             "epoch": epoch,
+            "monitor": args.monitor,
+            "best_score": best_score,
             "best_val_loss": best_val_loss,
+            "best_val_mae": best_val_mae,
+            "residual_loss_weight": args.residual_loss_weight,
+            "residual_loss_beta": args.residual_loss_beta,
             "split_mode": args.split_mode,
             "train_sequences": [name for name, _, _ in train_sequences],
             "val_sequences": [name for name, _, _ in val_sequences],
@@ -374,8 +436,11 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
+    best_score = float("inf")
     best_val_loss = float("inf")
+    best_val_mae = float("inf")
     best_state = None
+    best_epoch = 0
     epochs_without_improvement = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -385,7 +450,13 @@ def main():
             history = history.to(device, non_blocking=True)
             target = target.to(device, non_blocking=True)
             pred_residual, pred_log_var = model(history)
-            loss = residual_nll_loss(pred_residual, pred_log_var, target)
+            loss, _, _ = motion_loss(
+                pred_residual,
+                pred_log_var,
+                target,
+                args.residual_loss_weight,
+                args.residual_loss_beta,
+            )
 
             optimizer.zero_grad()
             loss.backward()
@@ -398,14 +469,40 @@ def main():
 
         train_loss = total_loss / max(total_count, 1)
         if val_loader is not None:
-            val_loss, val_mae = evaluate(model, val_loader, device)
+            val_loss, val_nll, val_residual_loss, val_mae, val_mae_per_dim = evaluate(
+                model,
+                val_loader,
+                device,
+                args.residual_loss_weight,
+                args.residual_loss_beta,
+            )
+            monitor_score = val_mae if args.monitor == "val_mae" else val_loss
+            mae_dim_text = " ".join(
+                "{}:{:.6f}".format(name, value)
+                for name, value in zip(("cx", "cy", "a", "h"), val_mae_per_dim)
+            )
             print(
-                "epoch {:03d} train_loss {:.6f} val_loss {:.6f} val_mae {:.6f}".format(
-                    epoch, train_loss, val_loss, val_mae
+                (
+                    "epoch {:03d} train_loss {:.6f} val_loss {:.6f} "
+                    "val_nll {:.6f} val_res {:.6f} val_mae {:.6f} "
+                    "mae_dim [{}] monitor {} {:.6f}"
+                ).format(
+                    epoch,
+                    train_loss,
+                    val_loss,
+                    val_nll,
+                    val_residual_loss,
+                    val_mae,
+                    mae_dim_text,
+                    args.monitor,
+                    monitor_score,
                 )
             )
-            if val_loss < best_val_loss - args.min_delta:
+            if monitor_score < best_score - args.min_delta:
+                best_score = monitor_score
                 best_val_loss = val_loss
+                best_val_mae = val_mae
+                best_epoch = epoch
                 best_state = {
                     key: value.detach().cpu()
                     for key, value in unwrap_model(model).state_dict().items()
@@ -418,9 +515,15 @@ def main():
                     train_sequences,
                     val_sequences,
                     epoch,
+                    best_score,
                     best_val_loss,
+                    best_val_mae,
                 )
-                print("saved best checkpoint to {}".format(args.output))
+                print(
+                    "saved best checkpoint to {} at epoch {} ({} {:.6f})".format(
+                        args.output, epoch, args.monitor, best_score
+                    )
+                )
             else:
                 epochs_without_improvement += 1
                 if args.patience > 0 and epochs_without_improvement >= args.patience:
@@ -442,8 +545,10 @@ def main():
         args.output,
         train_sequences,
         val_sequences,
-        epoch,
+        best_epoch if best_epoch > 0 else epoch,
+        best_score,
         best_val_loss,
+        best_val_mae,
     )
     print("Saved checkpoint to {}".format(args.output))
 
