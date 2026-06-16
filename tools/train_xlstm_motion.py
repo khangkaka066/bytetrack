@@ -40,7 +40,7 @@ def make_parser():
         "--monitor",
         type=str,
         default="val_loss",
-        choices=("val_loss", "val_mae"),
+        choices=("val_loss", "val_nll", "val_mae"),
         help="metric used for best checkpoint and early stopping",
     )
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -52,6 +52,7 @@ def make_parser():
         help="extra SmoothL1 residual loss weight; use 0.5 or 1.0 to emphasize residual accuracy",
     )
     parser.add_argument("--residual-loss-beta", type=float, default=1.0, help="SmoothL1 beta for residual loss")
+    parser.add_argument("--log-var-reg-weight", type=float, default=1e-4, help="L2 regularization weight for predicted log variance")
     parser.add_argument(
         "--split-mode",
         type=str,
@@ -246,15 +247,27 @@ def samples_to_tensors(samples):
     return torch.from_numpy(histories), torch.from_numpy(targets)
 
 
-def residual_nll_loss(pred_residual, pred_log_var, target_residual):
+def residual_nll_loss(pred_residual, pred_log_var, target_residual, log_var_reg_weight):
     pred_log_var = torch.clamp(pred_log_var, min=-10.0, max=10.0)
     diff = target_residual - pred_residual
     loss = 0.5 * torch.exp(-pred_log_var) * diff.pow(2) + 0.5 * pred_log_var
-    return loss.mean() + 1e-4 * pred_log_var.pow(2).mean()
+    return loss.mean() + log_var_reg_weight * pred_log_var.pow(2).mean()
 
 
-def motion_loss(pred_residual, pred_log_var, target_residual, residual_loss_weight, residual_loss_beta):
-    nll_loss = residual_nll_loss(pred_residual, pred_log_var, target_residual)
+def motion_loss(
+    pred_residual,
+    pred_log_var,
+    target_residual,
+    residual_loss_weight,
+    residual_loss_beta,
+    log_var_reg_weight,
+):
+    nll_loss = residual_nll_loss(
+        pred_residual,
+        pred_log_var,
+        target_residual,
+        log_var_reg_weight,
+    )
     residual_loss = F.smooth_l1_loss(
         pred_residual,
         target_residual,
@@ -265,7 +278,7 @@ def motion_loss(pred_residual, pred_log_var, target_residual, residual_loss_weig
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, residual_loss_weight, residual_loss_beta):
+def evaluate(model, loader, device, residual_loss_weight, residual_loss_beta, log_var_reg_weight):
     model.eval()
     total_loss = 0.0
     total_nll = 0.0
@@ -283,6 +296,7 @@ def evaluate(model, loader, device, residual_loss_weight, residual_loss_beta):
             target,
             residual_loss_weight,
             residual_loss_beta,
+            log_var_reg_weight,
         )
         abs_error = torch.abs(pred_residual - target)
         mae = abs_error.mean()
@@ -336,6 +350,7 @@ def save_checkpoint(
             "best_val_mae": best_val_mae,
             "residual_loss_weight": args.residual_loss_weight,
             "residual_loss_beta": args.residual_loss_beta,
+            "log_var_reg_weight": args.log_var_reg_weight,
             "split_mode": args.split_mode,
             "train_sequences": [name for name, _, _ in train_sequences],
             "val_sequences": [name for name, _, _ in val_sequences],
@@ -456,6 +471,7 @@ def main():
                 target,
                 args.residual_loss_weight,
                 args.residual_loss_beta,
+                args.log_var_reg_weight,
             )
 
             optimizer.zero_grad()
@@ -475,8 +491,14 @@ def main():
                 device,
                 args.residual_loss_weight,
                 args.residual_loss_beta,
+                args.log_var_reg_weight,
             )
-            monitor_score = val_mae if args.monitor == "val_mae" else val_loss
+            if args.monitor == "val_mae":
+                monitor_score = val_mae
+            elif args.monitor == "val_nll":
+                monitor_score = val_nll
+            else:
+                monitor_score = val_loss
             mae_dim_text = " ".join(
                 "{}:{:.6f}".format(name, value)
                 for name, value in zip(("cx", "cy", "a", "h"), val_mae_per_dim)
