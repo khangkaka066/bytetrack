@@ -54,6 +54,14 @@ def make_parser():
     parser.add_argument("--residual-loss-beta", type=float, default=1.0, help="SmoothL1 beta for residual loss")
     parser.add_argument("--log-var-reg-weight", type=float, default=1e-4, help="L2 regularization weight for predicted log variance")
     parser.add_argument(
+        "--target-normalization",
+        type=str,
+        default="none",
+        choices=("none", "standard"),
+        help="normalize target residuals before training; checkpoint stores stats for inference unnormalization",
+    )
+    parser.add_argument("--target-std-eps", type=float, default=1e-6)
+    parser.add_argument(
         "--split-mode",
         type=str,
         default="sequence",
@@ -247,6 +255,24 @@ def samples_to_tensors(samples):
     return torch.from_numpy(histories), torch.from_numpy(targets)
 
 
+def get_target_stats(target_tensor, mode, std_eps):
+    if mode == "standard":
+        target_mean = target_tensor.mean(dim=0)
+        target_std = target_tensor.std(dim=0).clamp_min(std_eps)
+    else:
+        target_mean = torch.zeros(target_tensor.shape[1], dtype=target_tensor.dtype)
+        target_std = torch.ones(target_tensor.shape[1], dtype=target_tensor.dtype)
+    return target_mean, target_std
+
+
+def normalize_target(target_tensor, target_mean, target_std):
+    return (target_tensor - target_mean) / target_std
+
+
+def denormalize_target(target_tensor, target_mean, target_std):
+    return target_tensor * target_std.to(target_tensor.device) + target_mean.to(target_tensor.device)
+
+
 def residual_nll_loss(pred_residual, pred_log_var, target_residual, log_var_reg_weight):
     pred_log_var = torch.clamp(pred_log_var, min=-10.0, max=10.0)
     diff = target_residual - pred_residual
@@ -278,7 +304,16 @@ def motion_loss(
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, residual_loss_weight, residual_loss_beta, log_var_reg_weight):
+def evaluate(
+    model,
+    loader,
+    device,
+    residual_loss_weight,
+    residual_loss_beta,
+    log_var_reg_weight,
+    target_mean,
+    target_std,
+):
     model.eval()
     total_loss = 0.0
     total_nll = 0.0
@@ -298,7 +333,9 @@ def evaluate(model, loader, device, residual_loss_weight, residual_loss_beta, lo
             residual_loss_beta,
             log_var_reg_weight,
         )
-        abs_error = torch.abs(pred_residual - target)
+        pred_residual_raw = denormalize_target(pred_residual, target_mean, target_std)
+        target_raw = denormalize_target(target, target_mean, target_std)
+        abs_error = torch.abs(pred_residual_raw - target_raw)
         mae = abs_error.mean()
         mae_per_dim = abs_error.mean(dim=0).detach().cpu().double()
         batch_size = history.size(0)
@@ -332,6 +369,8 @@ def save_checkpoint(
     best_score,
     best_val_loss,
     best_val_mae,
+    target_mean,
+    target_std,
 ):
     os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
     torch.save(
@@ -351,6 +390,9 @@ def save_checkpoint(
             "residual_loss_weight": args.residual_loss_weight,
             "residual_loss_beta": args.residual_loss_beta,
             "log_var_reg_weight": args.log_var_reg_weight,
+            "target_normalization": args.target_normalization,
+            "target_mean": target_mean.cpu().tolist(),
+            "target_std": target_std.cpu().tolist(),
             "split_mode": args.split_mode,
             "train_sequences": [name for name, _, _ in train_sequences],
             "val_sequences": [name for name, _, _ in val_sequences],
@@ -410,7 +452,20 @@ def main():
     if not train_samples:
         raise RuntimeError("No training samples were created. Check history length and gt files.")
 
-    train_history, train_target = samples_to_tensors(train_samples)
+    train_history, train_target_raw = samples_to_tensors(train_samples)
+    target_mean, target_std = get_target_stats(
+        train_target_raw,
+        args.target_normalization,
+        args.target_std_eps,
+    )
+    train_target = normalize_target(train_target_raw, target_mean, target_std)
+    print(
+        "Target normalization: {} mean {} std {}".format(
+            args.target_normalization,
+            ["{:.6f}".format(value) for value in target_mean.tolist()],
+            ["{:.6f}".format(value) for value in target_std.tolist()],
+        )
+    )
     train_loader = DataLoader(
         TensorDataset(train_history, train_target),
         batch_size=args.batch_size,
@@ -421,7 +476,8 @@ def main():
 
     val_loader = None
     if val_samples:
-        val_history, val_target = samples_to_tensors(val_samples)
+        val_history, val_target_raw = samples_to_tensors(val_samples)
+        val_target = normalize_target(val_target_raw, target_mean, target_std)
         val_loader = DataLoader(
             TensorDataset(val_history, val_target),
             batch_size=args.batch_size,
@@ -492,6 +548,8 @@ def main():
                 args.residual_loss_weight,
                 args.residual_loss_beta,
                 args.log_var_reg_weight,
+                target_mean,
+                target_std,
             )
             if args.monitor == "val_mae":
                 monitor_score = val_mae
@@ -540,6 +598,8 @@ def main():
                     best_score,
                     best_val_loss,
                     best_val_mae,
+                    target_mean,
+                    target_std,
                 )
                 print(
                     "saved best checkpoint to {} at epoch {} ({} {:.6f})".format(
@@ -571,6 +631,8 @@ def main():
         best_score,
         best_val_loss,
         best_val_mae,
+        target_mean,
+        target_std,
     )
     print("Saved checkpoint to {}".format(args.output))
 

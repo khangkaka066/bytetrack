@@ -110,6 +110,14 @@ class XlstmMotionPredictor:
 
         checkpoint_data = torch.load(checkpoint, map_location=self.device)
         state_dict = checkpoint_data.get("model", checkpoint_data)
+        target_mean = checkpoint_data.get("target_mean", None)
+        target_std = checkpoint_data.get("target_std", None)
+        if target_mean is not None and target_std is not None:
+            self.target_mean = np.asarray(target_mean, dtype=np.float32)
+            self.target_std = np.asarray(target_std, dtype=np.float32)
+        else:
+            self.target_mean = np.zeros(4, dtype=np.float32)
+            self.target_std = np.ones(4, dtype=np.float32)
         self.model.load_state_dict(state_dict)
         self.model.eval()
 
@@ -135,8 +143,9 @@ class XlstmMotionPredictor:
 
         residual = residual.cpu().numpy()
         log_var = log_var.cpu().numpy()
+        residual = residual * self.target_std + self.target_mean
         residual = np.clip(residual, -self.max_abs_residual, self.max_abs_residual)
-        variance = np.exp(np.clip(log_var, -10.0, 10.0))
+        variance = np.exp(np.clip(log_var, -10.0, 10.0)) * np.square(self.target_std)
 
         for batch_index, track_index in enumerate(ready_indices):
             means[track_index, :4] += residual[batch_index]
