@@ -40,11 +40,20 @@ def make_parser():
         "--monitor",
         type=str,
         default="val_loss",
-        choices=("val_loss", "val_nll", "val_mae"),
+        choices=("val_loss", "val_nll", "val_res", "val_mae"),
         help="metric used for best checkpoint and early stopping",
     )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="none",
+        choices=("none", "cosine"),
+        help="learning-rate schedule; cosine uses epoch-level warmup and annealing",
+    )
+    parser.add_argument("--warmup-epochs", type=int, default=0, help="linear warmup epochs for cosine schedule")
+    parser.add_argument("--min-lr", type=float, default=1e-6, help="minimum learning rate for cosine schedule")
     parser.add_argument(
         "--residual-loss-weight",
         type=float,
@@ -53,6 +62,12 @@ def make_parser():
     )
     parser.add_argument("--residual-loss-beta", type=float, default=1.0, help="SmoothL1 beta for residual loss")
     parser.add_argument("--log-var-reg-weight", type=float, default=1e-4, help="L2 regularization weight for predicted log variance")
+    parser.add_argument(
+        "--hard-sample-min-error",
+        type=float,
+        default=0.0,
+        help="keep only training samples whose raw max absolute cx/cy/h residual is at least this value; 0 disables filtering",
+    )
     parser.add_argument(
         "--target-normalization",
         type=str,
@@ -255,6 +270,20 @@ def samples_to_tensors(samples):
     return torch.from_numpy(histories), torch.from_numpy(targets)
 
 
+def filter_hard_samples(samples, min_error):
+    if min_error <= 0.0:
+        return samples
+
+    hard_samples = []
+    for history, target_residual in samples:
+        # Aspect-ratio residual is unitless and much smaller than pixel errors,
+        # so hard mining is based on center/height motion only.
+        max_error = float(np.max(np.abs(target_residual[[0, 1, 3]])))
+        if max_error >= min_error:
+            hard_samples.append((history, target_residual))
+    return hard_samples
+
+
 def get_target_stats(target_tensor, mode, std_eps):
     if mode == "standard":
         target_mean = target_tensor.mean(dim=0)
@@ -271,6 +300,34 @@ def normalize_target(target_tensor, target_mean, target_std):
 
 def denormalize_target(target_tensor, target_mean, target_std):
     return target_tensor * target_std.to(target_tensor.device) + target_mean.to(target_tensor.device)
+
+
+def build_lr_scheduler(optimizer, args):
+    if args.lr_scheduler == "none":
+        return None
+
+    if args.min_lr < 0.0:
+        raise ValueError("--min-lr must be non-negative")
+    if args.min_lr > args.lr:
+        raise ValueError("--min-lr cannot be greater than --lr")
+
+    warmup_epochs = max(0, args.warmup_epochs)
+    cosine_epochs = max(1, args.epochs - warmup_epochs)
+    min_lr_ratio = args.min_lr / args.lr if args.lr > 0.0 else 0.0
+
+    def lr_lambda(epoch_index):
+        current_epoch = epoch_index + 1
+        if warmup_epochs > 0 and current_epoch <= warmup_epochs:
+            return max(min_lr_ratio, float(current_epoch) / float(warmup_epochs))
+
+        progress = min(
+            1.0,
+            max(0.0, float(current_epoch - warmup_epochs) / float(cosine_epochs)),
+        )
+        cosine = 0.5 * (1.0 + np.cos(np.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
 def residual_nll_loss(pred_residual, pred_log_var, target_residual, log_var_reg_weight):
@@ -368,6 +425,7 @@ def save_checkpoint(
     epoch,
     best_score,
     best_val_loss,
+    best_val_res,
     best_val_mae,
     target_mean,
     target_std,
@@ -386,10 +444,15 @@ def save_checkpoint(
             "monitor": args.monitor,
             "best_score": best_score,
             "best_val_loss": best_val_loss,
+            "best_val_res": best_val_res,
             "best_val_mae": best_val_mae,
             "residual_loss_weight": args.residual_loss_weight,
             "residual_loss_beta": args.residual_loss_beta,
             "log_var_reg_weight": args.log_var_reg_weight,
+            "lr_scheduler": args.lr_scheduler,
+            "warmup_epochs": args.warmup_epochs,
+            "min_lr": args.min_lr,
+            "hard_sample_min_error": args.hard_sample_min_error,
             "target_normalization": args.target_normalization,
             "target_mean": target_mean.cpu().tolist(),
             "target_std": target_std.cpu().tolist(),
@@ -449,6 +512,16 @@ def main():
     print("Val sequences:", ", ".join(name for name, _, _ in val_sequences) or "none")
     train_samples = build_split(train_sequences)
     val_samples = build_split(val_sequences) if val_sequences else []
+    if args.hard_sample_min_error > 0.0:
+        original_count = len(train_samples)
+        train_samples = filter_hard_samples(train_samples, args.hard_sample_min_error)
+        print(
+            "Hard sample mining: kept {} / {} training samples with max(|cx,cy,h residual|) >= {:.6f}".format(
+                len(train_samples),
+                original_count,
+                args.hard_sample_min_error,
+            )
+        )
     if not train_samples:
         raise RuntimeError("No training samples were created. Check history length and gt files.")
 
@@ -506,9 +579,19 @@ def main():
             print("Using DataParallel on {} CUDA GPUs".format(gpu_count))
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = build_lr_scheduler(optimizer, args)
+    if scheduler is not None:
+        print(
+            "LR scheduler: {} warmup_epochs {} min_lr {:.8f}".format(
+                args.lr_scheduler,
+                args.warmup_epochs,
+                args.min_lr,
+            )
+        )
 
     best_score = float("inf")
     best_val_loss = float("inf")
+    best_val_res = float("inf")
     best_val_mae = float("inf")
     best_state = None
     best_epoch = 0
@@ -540,6 +623,7 @@ def main():
             total_count += batch_size
 
         train_loss = total_loss / max(total_count, 1)
+        current_lr = optimizer.param_groups[0]["lr"]
         if val_loader is not None:
             val_loss, val_nll, val_residual_loss, val_mae, val_mae_per_dim = evaluate(
                 model,
@@ -553,6 +637,8 @@ def main():
             )
             if args.monitor == "val_mae":
                 monitor_score = val_mae
+            elif args.monitor == "val_res":
+                monitor_score = val_residual_loss
             elif args.monitor == "val_nll":
                 monitor_score = val_nll
             else:
@@ -563,11 +649,12 @@ def main():
             )
             print(
                 (
-                    "epoch {:03d} train_loss {:.6f} val_loss {:.6f} "
+                    "epoch {:03d} lr {:.8f} train_loss {:.6f} val_loss {:.6f} "
                     "val_nll {:.6f} val_res {:.6f} val_mae {:.6f} "
                     "mae_dim [{}] monitor {} {:.6f}"
                 ).format(
                     epoch,
+                    current_lr,
                     train_loss,
                     val_loss,
                     val_nll,
@@ -581,6 +668,7 @@ def main():
             if monitor_score < best_score - args.min_delta:
                 best_score = monitor_score
                 best_val_loss = val_loss
+                best_val_res = val_residual_loss
                 best_val_mae = val_mae
                 best_epoch = epoch
                 best_state = {
@@ -597,6 +685,7 @@ def main():
                     epoch,
                     best_score,
                     best_val_loss,
+                    best_val_res,
                     best_val_mae,
                     target_mean,
                     target_std,
@@ -616,7 +705,10 @@ def main():
                     )
                     break
         else:
-            print("epoch {:03d} train_loss {:.6f}".format(epoch, train_loss))
+            print("epoch {:03d} lr {:.8f} train_loss {:.6f}".format(epoch, current_lr, train_loss))
+
+        if scheduler is not None:
+            scheduler.step()
 
     if best_state is not None:
         unwrap_model(model).load_state_dict(best_state)
@@ -630,6 +722,7 @@ def main():
         best_epoch if best_epoch > 0 else epoch,
         best_score,
         best_val_loss,
+        best_val_res,
         best_val_mae,
         target_mean,
         target_std,
