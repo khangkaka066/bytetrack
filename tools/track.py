@@ -22,11 +22,141 @@ import warnings
 import glob
 import numpy as np
 import motmetrics as mm
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
+
+# from yolox.xlstm.xlstm_motion import XlstmMotionPredictor
+from yolox.xlstm.xlstm_motion import XlstmMotionPredictor
+from yolox.xlstm.byte_tracker_slstm import BYTETrackerSLSTM
+# from yolox.xlstm.byte_tracker_slstm import BYTETrackerSLSTM
+from yolox.tracker.byte_tracker import STrack
+from yolox.evaluators import mot_evaluator
 
 if not hasattr(np, "asfarray"):
     np.asfarray = lambda a, dtype=float: np.asarray(a, dtype=dtype)
+
+
+def _track_xyah(track):
+    if track.mean is not None:
+        return np.asarray(track.mean[:4], dtype=np.float32)
+    return np.asarray(track.to_xyah(), dtype=np.float32)
+
+
+def _fit_motion_feature(feature, input_dim):
+    feature = np.asarray(feature, dtype=np.float32)
+    if feature.shape[0] == input_dim:
+        return feature
+    if feature.shape[0] > input_dim:
+        return feature[:input_dim]
+    return np.pad(feature, (0, input_dim - feature.shape[0]), mode="constant")
+
+
+def _append_xlstm_motion_history(track, input_dim, missed=0.0):
+    if track.mean is None:
+        return
+
+    if not hasattr(track, "motion_history"):
+        track.motion_history = deque(maxlen=getattr(STrack, "_xlstm_history_len", 16))
+
+    xyah = _track_xyah(track)
+    last_xyah = getattr(track, "_xlstm_last_xyah", None)
+    velocity = np.zeros(4, dtype=np.float32) if last_xyah is None else xyah - last_xyah
+    state_value = float(getattr(track.state, "value", track.state))
+    feature = np.concatenate(
+        [
+            xyah,
+            velocity,
+            np.asarray(
+                [
+                    float(getattr(track, "score", 0.0)),
+                    float(getattr(track, "tracklet_len", 0)),
+                    float(missed),
+                    state_value,
+                ],
+                dtype=np.float32,
+            ),
+        ]
+    )
+    track.motion_history.append(_fit_motion_feature(feature, input_dim))
+    track._xlstm_last_xyah = xyah
+
+
+def _install_xlstm_motion(args):
+    if not args.xlstm_motion_ckpt:
+        logger.info("xLSTM motion checkpoint not provided; using pure Kalman prediction.")
+        return None
+
+    predictor = XlstmMotionPredictor(args)
+    if not predictor.enabled:
+        logger.warning("xLSTM motion predictor is disabled; using pure Kalman prediction.")
+        return None
+
+    STrack._xlstm_motion_predictor = predictor
+    STrack._xlstm_history_len = predictor.history_len
+    STrack._xlstm_input_dim = predictor.input_dim
+
+    if getattr(STrack, "_xlstm_motion_patched", False):
+        logger.info("xLSTM motion predictor loaded from {}".format(args.xlstm_motion_ckpt))
+        return predictor
+
+    STrack._xlstm_orig_activate = STrack.activate
+    STrack._xlstm_orig_update = STrack.update
+    STrack._xlstm_orig_re_activate = STrack.re_activate
+    STrack._xlstm_orig_multi_predict = STrack.multi_predict
+
+    def activate_with_xlstm(self, kalman_filter, frame_id):
+        STrack._xlstm_orig_activate(self, kalman_filter, frame_id)
+        _append_xlstm_motion_history(self, STrack._xlstm_input_dim, missed=0.0)
+
+    def update_with_xlstm(self, new_track, frame_id):
+        STrack._xlstm_orig_update(self, new_track, frame_id)
+        _append_xlstm_motion_history(self, STrack._xlstm_input_dim, missed=0.0)
+
+    def re_activate_with_xlstm(self, new_track, frame_id, new_id=False):
+        STrack._xlstm_orig_re_activate(self, new_track, frame_id, new_id=new_id)
+        _append_xlstm_motion_history(self, STrack._xlstm_input_dim, missed=0.0)
+
+    def multi_predict_with_xlstm(stracks):
+        STrack._xlstm_orig_multi_predict(stracks)
+        predictor = getattr(STrack, "_xlstm_motion_predictor", None)
+        if predictor is None or not predictor.enabled or len(stracks) == 0:
+            return
+
+        means = np.asarray([track.mean.copy() for track in stracks])
+        covariances = np.asarray([track.covariance for track in stracks])
+        means, covariances = predictor.refine(stracks, means, covariances)
+        for track, mean, covariance in zip(stracks, means, covariances):
+            track.mean = mean
+            track.covariance = covariance
+
+    STrack.activate = activate_with_xlstm
+    STrack.update = update_with_xlstm
+    STrack.re_activate = re_activate_with_xlstm
+    STrack.multi_predict = staticmethod(multi_predict_with_xlstm)
+    STrack._xlstm_motion_patched = True
+
+    logger.info("xLSTM motion predictor loaded from {}".format(args.xlstm_motion_ckpt))
+    return predictor
+
+
+def _install_slstm_tracker(args):
+    if not args.slstm_ckpt:
+        return
+
+    def build_slstm_tracker(tracker_args, frame_rate=30):
+        return BYTETrackerSLSTM(
+            tracker_args,
+            frame_rate=frame_rate,
+            slstm_ckpt=args.slstm_ckpt,
+            vocab_size=args.slstm_vocab_size,
+            context_length=args.slstm_context_length,
+            alpha0=args.slstm_alpha0,
+            beta=args.slstm_beta,
+            device=args.xlstm_device,
+        )
+
+    mot_evaluator.BYTETracker = build_slstm_tracker
+    logger.info("Using BYTETrackerSLSTM with checkpoint {}".format(args.slstm_ckpt))
 
 
 def make_parser():
@@ -117,6 +247,11 @@ def make_parser():
     parser.add_argument("--match_thresh", type=float, default=0.9, help="matching threshold for tracking")
     parser.add_argument("--min-box-area", type=float, default=100, help='filter out tiny boxes')
     parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
+    parser.add_argument("--slstm_ckpt", type=str, default=None, help="optional sLSTM token trajectory checkpoint")
+    parser.add_argument("--slstm_vocab_size", type=int, default=256, help="sLSTM trajectory token vocabulary size")
+    parser.add_argument("--slstm_context_length", type=int, default=256, help="sLSTM token context length")
+    parser.add_argument("--slstm_alpha0", type=float, default=0.5, help="maximum sLSTM/Kalman blend weight")
+    parser.add_argument("--slstm_beta", type=float, default=0.3, help="sLSTM blend decay for missing tracks")
     parser.add_argument("--xlstm_motion_ckpt", type=str, default=None, help="optional xLSTM motion residual checkpoint")
     parser.add_argument("--xlstm_history_len", type=int, default=16, help="xLSTM motion history length")
     parser.add_argument("--xlstm_input_dim", type=int, default=12, help="xLSTM motion history feature dimension")
@@ -173,6 +308,11 @@ def main(exp, args, num_gpu):
 
     setup_logger(file_name, distributed_rank=rank, filename="val_log.txt", mode="a")
     logger.info("Args: {}".format(args))
+
+    if (args.slstm_ckpt or args.xlstm_motion_ckpt) and args.xlstm_device is None and torch.cuda.is_available():
+        args.xlstm_device = "cuda:{}".format(rank)
+    _install_slstm_tracker(args)
+    _install_xlstm_motion(args)
 
     if args.conf is not None:
         exp.test_conf = args.conf
@@ -312,3 +452,4 @@ if __name__ == "__main__":
         dist_url=args.dist_url,
         args=(exp, args, num_gpu),
     )
+
