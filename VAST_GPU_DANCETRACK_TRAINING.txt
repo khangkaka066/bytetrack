@@ -41,7 +41,7 @@ cd /workspace/bytetrack
 3. Cai Kaggle API
 -----------------
 
-python -m pip install -q kaggle
+pip install -q kaggle
 
 
 4. Dang Nhap Kaggle Bang API Token
@@ -153,9 +153,9 @@ File quan trong thuong la:
 git clone https://github.com/khangkaka066/bytetrack.git /workspace/bytetrack
 cd /workspace/bytetrack
 
-python -m pip install -q kaggle
+pip install -q kaggle
 
-export KAGGLE_USERNAME=phngnguyndiu
+export KAGGLE_USERNAME=nguyenvohoangkhang
 export KAGGLE_KEY=YOUR_KAGGLE_API_TOKEN
 
 mkdir -p /workspace/datasets/dancetrack-zip
