@@ -1,0 +1,176 @@
+HUONG DAN CHAY FINE-TUNE YOLOX-M DANCETRACK TREN VAST GPU
+============================================================
+
+File nay huong dan cach tai dataset DanceTrack tu Kaggle va chay notebook
+finetune_yolox_m_dancetrack_container.ipynb tren may thue GPU Vast.
+
+Luu y bao mat:
+- Khong commit token Kaggle vao git.
+- Khong luu token that vao notebook/repo public.
+- Vi token da duoc paste trong chat, nen sau khi chay xong ban nen vao Kaggle
+  Account Settings -> API -> Expire API Token, roi tao token moi neu can.
+
+
+1. Mo Vast Instance
+-------------------
+
+Nen chon image/container co:
+- NVIDIA GPU + CUDA
+- Python 3.9/3.10
+- JupyterLab hoac Jupyter Notebook
+- Dung luong disk du lon cho DanceTrack va checkpoint output
+
+Khuyen nghi disk:
+- Toi thieu 100 GB
+- Tot hon: 150 GB tro len
+
+
+2. Vao Terminal Tren Vast
+-------------------------
+
+Neu repo chua co trong /workspace, clone repo:
+
+git clone https://github.com/khangkaka066/bytetrack.git /workspace/bytetrack
+cd /workspace/bytetrack
+
+Neu ban upload san repo/notebook len Vast thi chi can cd vao repo:
+
+cd /workspace/bytetrack
+
+
+3. Cai Kaggle API
+-----------------
+
+python -m pip install -q kaggle
+
+
+4. Dang Nhap Kaggle Bang API Token
+----------------------------------
+
+Chay lenh duoi day trong terminal Vast.
+Thay YOUR_KAGGLE_API_TOKEN bang token Kaggle cua ban.
+
+export KAGGLE_USERNAME=phngnguyndiu
+export KAGGLE_KEY=KGAT_3cfa4d14ab994e5ba4b4497ceff67cc4
+
+Kiem tra Kaggle API:
+
+kaggle datasets list -s dancetrack
+
+Neu lenh tren in ra danh sach dataset la OK.
+
+
+5. Tai Va Giai Nen DanceTrack
+-----------------------------
+
+mkdir -p /workspace/datasets/dancetrack-zip
+
+kaggle datasets download \
+  -d phngnguyndiu/dancetrack-zip \
+  -p /workspace/datasets/dancetrack-zip \
+  --unzip
+
+Kiem tra cau truc:
+
+find /workspace/datasets/dancetrack-zip -maxdepth 3 -type d | head -80
+
+Ban nen thay cac folder dang:
+
+/workspace/datasets/dancetrack-zip/train1/train1
+/workspace/datasets/dancetrack-zip/train2/train2
+/workspace/datasets/dancetrack-zip/val/val
+/workspace/datasets/dancetrack-zip/test1/test1
+/workspace/datasets/dancetrack-zip/test2/test2
+
+
+6. Mo Notebook
+--------------
+
+Mo JupyterLab tren Vast, roi mo file:
+
+/workspace/bytetrack/finetune_yolox_m_dancetrack_container.ipynb
+
+Trong Cell 1, sua cac path thanh:
+
+REPO_DIR = Path('/workspace/bytetrack')
+DATASET_ROOT = Path('/workspace/datasets/dancetrack-zip')
+PRETRAINED_CKPT = Path('/workspace/yolox_m_pretrained.pth')
+
+Neu ban chua co checkpoint o /workspace/yolox_m_pretrained.pth, notebook se tu
+tai checkpoint bang gdown tu Google Drive link da cau hinh san.
+
+
+7. Chay Notebook Theo Thu Tu
+----------------------------
+
+Chay lan luot:
+
+Cell 1: Configure paths
+Cell 2: Clone repo if needed
+Cell 3: Install dependencies
+Cell 4: Prepare checkpoint
+Cell 5: Inspect dataset
+Cell 6: Write DanceTrack-to-COCO converter
+Cell 7: Convert annotations
+Cell 8: Patch MOTDataset
+Cell 9: Write YOLOX-M fine-tuning experiment
+Cell 10: Smoke-test dataloader
+Cell 11: Train
+Cell 12: Check outputs
+
+
+8. Neu Bi Out Of Memory
+-----------------------
+
+Trong Cell 11, giam:
+
+BATCH_SIZE = 4
+
+thanh:
+
+BATCH_SIZE = 2
+
+Neu van loi OOM, dung:
+
+BATCH_SIZE = 1
+
+
+9. Output Sau Khi Train
+-----------------------
+
+Checkpoint nam tai:
+
+/workspace/bytetrack/YOLOX_outputs/yolox_m_finetune_dancetrack/
+
+File quan trong thuong la:
+
+/workspace/bytetrack/YOLOX_outputs/yolox_m_finetune_dancetrack/best_ckpt.pth.tar
+
+
+10. Lenh Tom Tat Chay Nhanh
+---------------------------
+
+git clone https://github.com/khangkaka066/bytetrack.git /workspace/bytetrack
+cd /workspace/bytetrack
+
+python -m pip install -q kaggle
+
+export KAGGLE_USERNAME=phngnguyndiu
+export KAGGLE_KEY=YOUR_KAGGLE_API_TOKEN
+
+mkdir -p /workspace/datasets/dancetrack-zip
+
+kaggle datasets download \
+  -d phngnguyndiu/dancetrack-zip \
+  -p /workspace/datasets/dancetrack-zip \
+  --unzip
+
+find /workspace/datasets/dancetrack-zip -maxdepth 3 -type d | head -80
+
+Sau do mo notebook:
+
+/workspace/bytetrack/finetune_yolox_m_dancetrack_container.ipynb
+
+Va sua DATASET_ROOT thanh:
+
+DATASET_ROOT = Path('/workspace/datasets/dancetrack-zip')
