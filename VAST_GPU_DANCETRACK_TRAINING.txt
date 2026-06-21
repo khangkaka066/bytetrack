@@ -51,7 +51,7 @@ Chay lenh duoi day trong terminal Vast.
 Thay YOUR_KAGGLE_API_TOKEN bang token Kaggle cua ban.
 
 export KAGGLE_USERNAME=nguyenvohoangkhang
-export KAGGLE_KEY=KGAT_3cfa4d14ab994e5ba4b4497ceff67cc4
+export KAGGLE_KEY=YOUR_KAGGLE_API_TOKEN
 
 Kiem tra Kaggle API:
 
