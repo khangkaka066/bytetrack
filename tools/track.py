@@ -82,62 +82,15 @@ def _append_xlstm_motion_history(track, input_dim, missed=0.0):
 
 
 def _install_xlstm_motion(args):
-    if not args.xlstm_motion_ckpt:
-        if not getattr(args, "ltc_motion_ckpt", None):
-            logger.info("xLSTM/LTC motion checkpoint not provided; using pure Kalman prediction.")
-        return None
-
-    predictor = XlstmMotionPredictor(args)
-    if not predictor.enabled:
-        logger.warning("xLSTM motion predictor is disabled; using pure Kalman prediction.")
-        return None
-
-    STrack._xlstm_motion_predictor = predictor
-    STrack._xlstm_history_len = predictor.history_len
-    STrack._xlstm_input_dim = predictor.input_dim
-
-    if getattr(STrack, "_xlstm_motion_patched", False):
-        logger.info("xLSTM motion predictor loaded from {}".format(args.xlstm_motion_ckpt))
-        return predictor
-
-    STrack._xlstm_orig_activate = STrack.activate
-    STrack._xlstm_orig_update = STrack.update
-    STrack._xlstm_orig_re_activate = STrack.re_activate
-    STrack._xlstm_orig_multi_predict = STrack.multi_predict
-
-    def activate_with_xlstm(self, kalman_filter, frame_id):
-        STrack._xlstm_orig_activate(self, kalman_filter, frame_id)
-        _append_xlstm_motion_history(self, STrack._xlstm_input_dim, missed=0.0)
-
-    def update_with_xlstm(self, new_track, frame_id):
-        STrack._xlstm_orig_update(self, new_track, frame_id)
-        _append_xlstm_motion_history(self, STrack._xlstm_input_dim, missed=0.0)
-
-    def re_activate_with_xlstm(self, new_track, frame_id, new_id=False):
-        STrack._xlstm_orig_re_activate(self, new_track, frame_id, new_id=new_id)
-        _append_xlstm_motion_history(self, STrack._xlstm_input_dim, missed=0.0)
-
-    def multi_predict_with_xlstm(stracks):
-        STrack._xlstm_orig_multi_predict(stracks)
-        predictor = getattr(STrack, "_xlstm_motion_predictor", None)
-        if predictor is None or not predictor.enabled or len(stracks) == 0:
-            return
-
-        means = np.asarray([track.mean.copy() for track in stracks])
-        covariances = np.asarray([track.covariance for track in stracks])
-        means, covariances = predictor.refine(stracks, means, covariances)
-        for track, mean, covariance in zip(stracks, means, covariances):
-            track.mean = mean
-            track.covariance = covariance
-
-    STrack.activate = activate_with_xlstm
-    STrack.update = update_with_xlstm
-    STrack.re_activate = re_activate_with_xlstm
-    STrack.multi_predict = staticmethod(multi_predict_with_xlstm)
-    STrack._xlstm_motion_patched = True
-
-    logger.info("xLSTM motion predictor loaded from {}".format(args.xlstm_motion_ckpt))
-    return predictor
+    if args.xlstm_motion_ckpt:
+        logger.info(
+            "xLSTM motion checkpoint will be loaded by BYTETracker from {}".format(
+                args.xlstm_motion_ckpt
+            )
+        )
+    elif not getattr(args, "ltc_motion_ckpt", None):
+        logger.info("xLSTM/LTC motion checkpoint not provided; using pure Kalman prediction.")
+    return None
 
 
 def _install_slstm_tracker(args):
