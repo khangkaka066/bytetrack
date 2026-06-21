@@ -104,6 +104,15 @@ def make_parser():
     parser.add_argument("--xlstm_device", type=str, default=None, help="device for xLSTM motion model")
     parser.add_argument("--xlstm_covariance_scale", type=float, default=1.0, help="scale for log_var covariance inflation")
     parser.add_argument("--xlstm_max_abs_residual", type=float, default=256.0, help="clip xLSTM residual magnitude")
+    parser.add_argument("--ltc_motion_ckpt", type=str, default=None, help="optional LTC/CfC motion residual checkpoint")
+    parser.add_argument("--ltc_history_len", type=int, default=16, help="LTC motion history length")
+    parser.add_argument("--ltc_input_dim", type=int, default=12, help="LTC motion history feature dimension")
+    parser.add_argument("--ltc_min_history", type=int, default=16, help="minimum history length before applying LTC")
+    parser.add_argument("--ltc_hidden_size", type=int, default=128, help="LTC hidden size")
+    parser.add_argument("--ltc_num_layers", type=int, default=2, help="number of LTC/CfC layers")
+    parser.add_argument("--ltc_device", type=str, default=None, help="device for LTC motion model")
+    parser.add_argument("--ltc_covariance_scale", type=float, default=1.0, help="scale for LTC log_var covariance inflation")
+    parser.add_argument("--ltc_max_abs_residual", type=float, default=256.0, help="clip LTC residual magnitude")
     return parser
 
 

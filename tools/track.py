@@ -83,7 +83,8 @@ def _append_xlstm_motion_history(track, input_dim, missed=0.0):
 
 def _install_xlstm_motion(args):
     if not args.xlstm_motion_ckpt:
-        logger.info("xLSTM motion checkpoint not provided; using pure Kalman prediction.")
+        if not getattr(args, "ltc_motion_ckpt", None):
+            logger.info("xLSTM/LTC motion checkpoint not provided; using pure Kalman prediction.")
         return None
 
     predictor = XlstmMotionPredictor(args)
@@ -263,6 +264,15 @@ def make_parser():
     parser.add_argument("--xlstm_device", type=str, default=None, help="device for xLSTM motion model")
     parser.add_argument("--xlstm_covariance_scale", type=float, default=1.0, help="scale for log_var covariance inflation")
     parser.add_argument("--xlstm_max_abs_residual", type=float, default=256.0, help="clip xLSTM residual magnitude")
+    parser.add_argument("--ltc_motion_ckpt", type=str, default=None, help="optional LTC/CfC motion residual checkpoint")
+    parser.add_argument("--ltc_history_len", type=int, default=16, help="LTC motion history length")
+    parser.add_argument("--ltc_input_dim", type=int, default=12, help="LTC motion history feature dimension")
+    parser.add_argument("--ltc_min_history", type=int, default=16, help="minimum history length before applying LTC")
+    parser.add_argument("--ltc_hidden_size", type=int, default=128, help="LTC hidden size")
+    parser.add_argument("--ltc_num_layers", type=int, default=2, help="number of LTC/CfC layers")
+    parser.add_argument("--ltc_device", type=str, default=None, help="device for LTC motion model")
+    parser.add_argument("--ltc_covariance_scale", type=float, default=1.0, help="scale for LTC log_var covariance inflation")
+    parser.add_argument("--ltc_max_abs_residual", type=float, default=256.0, help="clip LTC residual magnitude")
     return parser
 
 
@@ -311,6 +321,8 @@ def main(exp, args, num_gpu):
 
     if (args.slstm_ckpt or args.xlstm_motion_ckpt) and args.xlstm_device is None and torch.cuda.is_available():
         args.xlstm_device = "cuda:{}".format(rank)
+    if args.ltc_motion_ckpt and args.ltc_device is None and torch.cuda.is_available():
+        args.ltc_device = "cuda:{}".format(rank)
     _install_slstm_tracker(args)
     _install_xlstm_motion(args)
 
@@ -452,4 +464,3 @@ if __name__ == "__main__":
         dist_url=args.dist_url,
         args=(exp, args, num_gpu),
     )
-

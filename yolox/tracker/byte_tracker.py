@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from .kalman_filter import KalmanFilter
+from .ltc_motion import LtcMotionPredictor
 from .xlstm_motion import XlstmMotionPredictor
 from yolox.tracker import matching
 from .basetrack import BaseTrack, TrackState
@@ -205,8 +206,14 @@ class BYTETracker(object):
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
-        STrack.motion_history_len = int(getattr(args, "xlstm_history_len", DEFAULT_XLSTM_HISTORY_LEN))
-        self.motion_predictor = XlstmMotionPredictor(args)
+        STrack.motion_history_len = max(
+            int(getattr(args, "xlstm_history_len", DEFAULT_XLSTM_HISTORY_LEN)),
+            int(getattr(args, "ltc_history_len", DEFAULT_XLSTM_HISTORY_LEN)),
+        )
+        if getattr(args, "ltc_motion_ckpt", None):
+            self.motion_predictor = LtcMotionPredictor(args)
+        else:
+            self.motion_predictor = XlstmMotionPredictor(args)
 
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
