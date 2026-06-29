@@ -1,0 +1,11 @@
+_BASE_: ../Base-SBS.yml
+
+MODEL:
+  BACKBONE:
+    NAME: build_resnest_backbone
+
+DATASETS:
+  NAMES: ("SportMOT",)
+  TESTS: ("SportMOT",)
+
+OUTPUT_DIR: fast_reid/logs/sportmot/sbs_S50

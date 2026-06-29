@@ -141,3 +141,5 @@ pretrained
 YOLOX_outputs
 checkpoints/*
 datasets/mot
+datasets
+reid_weights

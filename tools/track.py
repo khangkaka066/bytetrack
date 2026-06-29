@@ -226,6 +226,20 @@ def make_parser():
     parser.add_argument("--ltc_device", type=str, default=None, help="device for LTC motion model")
     parser.add_argument("--ltc_covariance_scale", type=float, default=1.0, help="scale for LTC log_var covariance inflation")
     parser.add_argument("--ltc_max_abs_residual", type=float, default=256.0, help="clip LTC residual magnitude")
+    # reid args
+    parser.add_argument("--with-reid", dest="with_reid", default=False, action="store_true", help="use ReID features in ByteTrack association")
+    parser.add_argument("--fast-reid", dest="fast_reid", default=False, action="store_true", help="use FastReID backend for ReID features")
+    parser.add_argument("--reid-device", type=str, default="cuda", help="ReID device, e.g. cuda or cpu")
+    parser.add_argument("--reid-weight", type=float, default=0.35, help="appearance cost weight when fusing IoU and ReID")
+    parser.add_argument("--reid-thresh", type=float, default=0.7, help="max cosine distance allowed before ReID cost is capped")
+    parser.add_argument("--reid-alpha", type=float, default=0.9, help="EMA momentum for track ReID features")
+    parser.add_argument("--reid-model", type=str, default="osnet_x1_0", help="torchreid model name (deep backend)")
+    parser.add_argument("--reid-model-path", type=str, default="", help="path to ReID model weights (deep backend)")
+    parser.add_argument("--fast-reid-config", type=str, default="", help="FastReID config yaml")
+    parser.add_argument("--fast-reid-weights", type=str, default="", help="FastReID model weights; falls back to --reid-model-path")
+    parser.add_argument("--fast-reid-batch-size", type=int, default=16, help="FastReID inference batch size")
+    parser.add_argument("--dma-weights", type=str, default=None, help="DMA fusion checkpoint path")
+    parser.add_argument("--dma-device", type=str, default="cpu", help="device for DMA fusion model")
     return parser
 
 
@@ -268,6 +282,7 @@ def main(exp, args, num_gpu):
 
     results_folder = os.path.join(file_name, "track_results")
     os.makedirs(results_folder, exist_ok=True)
+    video_folder = os.path.join(file_name, "videos")
 
     setup_logger(file_name, distributed_rank=rank, filename="val_log.txt", mode="a")
     logger.info("Args: {}".format(args))
@@ -350,21 +365,29 @@ def main(exp, args, num_gpu):
         gt_type = '_val_half'
     else:
         gt_type = ''
-    print('gt_type', gt_type)
+    eval_dataset = getattr(val_loader, "dataset", None)
+    gt_root = None
+    dataset_root = getattr(eval_dataset, "data_dir", None)
+    dataset_split = getattr(eval_dataset, "name", None)
+    if dataset_root and dataset_split:
+        gt_root = os.path.join(dataset_root, dataset_split)
+
     if args.mot20:
-        gtfiles = glob.glob(os.path.join('datasets/MOT20/train', '*/gt/gt{}.txt'.format(gt_type)))
+        gt_root = gt_root or os.path.join('datasets', 'MOT20', 'train')
     else:
-        gtfiles = glob.glob(os.path.join('datasets/mot/train', '*/gt/gt{}.txt'.format(gt_type)))
-    print('gt_files', gtfiles)
+        gt_root = gt_root or os.path.join('datasets', 'mot', 'train')
+
+    gtfiles = glob.glob(os.path.join(gt_root, '*/gt/gt{}.txt'.format(gt_type)))
     tsfiles = [f for f in glob.glob(os.path.join(results_folder, '*.txt')) if not os.path.basename(f).startswith('eval')]
 
     logger.info('Found {} groundtruths and {} test files.'.format(len(gtfiles), len(tsfiles)))
     logger.info('Available LAP solvers {}'.format(mm.lap.available_solvers))
     logger.info('Default LAP solver \'{}\''.format(mm.lap.default_solver))
     logger.info('Loading files.')
-    
-    gt = OrderedDict([(Path(f).parts[-3], mm.io.loadtxt(f, fmt='mot15-2D', min_confidence=1)) for f in gtfiles])
-    ts = OrderedDict([(os.path.splitext(Path(f).parts[-1])[0], mm.io.loadtxt(f, fmt='mot15-2D', min_confidence=-1)) for f in tsfiles])    
+
+    mot_csv_sep = r'\s*,\s*'
+    gt = OrderedDict([(Path(f).parts[-3], mm.io.loadtxt(f, fmt='mot15-2D', min_confidence=1, sep=mot_csv_sep)) for f in gtfiles])
+    ts = OrderedDict([(os.path.splitext(Path(f).parts[-1])[0], mm.io.loadtxt(f, fmt='mot15-2D', min_confidence=-1, sep=mot_csv_sep)) for f in tsfiles])    
     
     mh = mm.metrics.create()    
     accs, names = compare_dataframes(gt, ts)
@@ -398,12 +421,28 @@ def main(exp, args, num_gpu):
 
 
 if __name__ == "__main__":
-    args = make_parser().parse_args()
+    parser = make_parser()
+    args = parser.parse_args()
+    if args.fast_reid:
+        if not args.fast_reid_config:
+            parser.error("--fast-reid-config is required with --fast-reid")
+        if not args.fast_reid_weights and not args.reid_model_path:
+            parser.error("--fast-reid-weights or --reid-model-path is required with --fast-reid")
+    args.reid_backend = "fast" if args.fast_reid else "deep"
     exp = get_exp(args.exp_file, args.name)
     exp.merge(args.opts)
 
     if not args.experiment_name:
-        args.experiment_name = exp.exp_name
+        if args.slstm_ckpt:
+            args.experiment_name = "eval_slstm"
+        elif args.xlstm_motion_ckpt:
+            args.experiment_name = "eval_xlstm"
+        elif args.ltc_motion_ckpt:
+            args.experiment_name = "eval_ltc"
+        elif args.with_reid:
+            args.experiment_name = "eval_reid"
+        else:
+            args.experiment_name = exp.exp_name
 
     num_gpu = torch.cuda.device_count() if args.devices is None else args.devices
     assert num_gpu <= torch.cuda.device_count()
