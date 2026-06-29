@@ -170,12 +170,14 @@ def build_reid_extractor(args):
             getattr(args, "fast_reid_batch_size", 16),
         )
         if cache_key not in _REID_EXTRACTOR_CACHE:
-            _REID_EXTRACTOR_CACHE[cache_key] = FastReIDExtractor(
+            extractor = FastReIDExtractor(
                 config_file=getattr(args, "fast_reid_config", ""),
                 model_path=fast_weights,
                 device=getattr(args, "reid_device", "cuda"),
                 batch_size=getattr(args, "fast_reid_batch_size", 16),
             )
+            print(f"[ReID] Backend: FastReID | config: {getattr(args, 'fast_reid_config', '')} | weights: {fast_weights} | device: {getattr(args, 'reid_device', 'cuda')}")
+            _REID_EXTRACTOR_CACHE[cache_key] = extractor
         return _REID_EXTRACTOR_CACHE[cache_key]
     if backend == "deep":
         cache_key = (
@@ -185,11 +187,13 @@ def build_reid_extractor(args):
             getattr(args, "reid_device", "cuda"),
         )
         if cache_key not in _REID_EXTRACTOR_CACHE:
-            _REID_EXTRACTOR_CACHE[cache_key] = ReIDExtractor(
+            extractor = ReIDExtractor(
                 model_name=getattr(args, "reid_model", "osnet_x1_0"),
                 model_path=getattr(args, "reid_model_path", ""),
                 device=getattr(args, "reid_device", "cuda"),
             )
+            print(f"[ReID] Backend: TorchReID | model: {getattr(args, 'reid_model', 'osnet_x1_0')} | weights: {getattr(args, 'reid_model_path', '(pretrained)')} | device: {getattr(args, 'reid_device', 'cuda')}")
+            _REID_EXTRACTOR_CACHE[cache_key] = extractor
         return _REID_EXTRACTOR_CACHE[cache_key]
     raise ValueError("Unsupported ReID backend: {}".format(backend))
 
@@ -213,3 +217,4 @@ def crop_tlbrs(frame, tlbrs):
         else:
             crops.append(frame[y1:y2, x1:x2].copy())
     return crops
+

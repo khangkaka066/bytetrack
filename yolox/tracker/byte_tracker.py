@@ -7,8 +7,6 @@ import torch
 import torch.nn.functional as F
 
 from .kalman_filter import KalmanFilter
-from .ltc_motion import LtcMotionPredictor
-from .xlstm_motion import XlstmMotionPredictor
 from .reid import build_reid_extractor
 from yolox.tracker import matching
 from .basetrack import BaseTrack, TrackState
@@ -19,12 +17,8 @@ try:
 except ImportError:
     _DMA_AVAILABLE = False
 
-DEFAULT_XLSTM_HISTORY_LEN = 16
-
-
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
-    motion_history_len = DEFAULT_XLSTM_HISTORY_LEN
     def __init__(self, tlwh, score, feat=None, alpha=0.9):
 
         # wait activate
@@ -35,11 +29,6 @@ class STrack(BaseTrack):
 
         self.score = score
         self.tracklet_len = 0
-        self.motion_history = deque(maxlen=STrack.motion_history_len)
-        self.missing_count = 0
-        self._last_motion_frame = None
-
-        # ReID appearance features
         self.alpha = alpha
         self.curr_feat = None
         self.smooth_feat = None
@@ -69,7 +58,7 @@ class STrack(BaseTrack):
         self.mean, self.covariance = self.kalman_filter.predict(mean_state, self.covariance)
 
     @staticmethod
-    def multi_predict(stracks, motion_predictor=None):
+    def multi_predict(stracks):
         if len(stracks) > 0:
             multi_mean = np.asarray([st.mean.copy() for st in stracks])
             multi_covariance = np.asarray([st.covariance for st in stracks])
@@ -77,10 +66,6 @@ class STrack(BaseTrack):
                 if st.state != TrackState.Tracked:
                     multi_mean[i][7] = 0
             multi_mean, multi_covariance = STrack.shared_kalman.multi_predict(multi_mean, multi_covariance)
-            if motion_predictor is not None:
-                multi_mean, multi_covariance = motion_predictor.refine(
-                    stracks, multi_mean, multi_covariance
-                )
             for i, (mean, cov) in enumerate(zip(multi_mean, multi_covariance)):
                 stracks[i].mean = mean
                 stracks[i].covariance = cov
@@ -98,7 +83,6 @@ class STrack(BaseTrack):
         # self.is_activated = True
         self.frame_id = frame_id
         self.start_frame = frame_id
-        self._append_motion_history(frame_id, self.score, is_missing=False)
 
     def re_activate(self, new_track, frame_id, new_id=False):
         self.mean, self.covariance = self.kalman_filter.update(
@@ -113,7 +97,6 @@ class STrack(BaseTrack):
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
-        self._append_motion_history(frame_id, self.score, is_missing=False)
 
     def update(self, new_track, frame_id):
         """
@@ -135,41 +118,6 @@ class STrack(BaseTrack):
         self.is_activated = True
 
         self.score = new_track.score
-        self._append_motion_history(frame_id, self.score, is_missing=False)
-
-    def append_missing_motion(self, frame_id):
-        if self.mean is None or self._last_motion_frame == frame_id:
-            return
-        self.missing_count += 1
-        self._append_motion_history(frame_id, 0.0, is_missing=True)
-
-    def _append_motion_history(self, frame_id, confidence, is_missing):
-        if self.mean is None:
-            return
-        delta_t = 1.0
-        if self._last_motion_frame is not None:
-            delta_t = max(1.0, float(frame_id - self._last_motion_frame))
-        if not is_missing:
-            self.missing_count = 0
-        feature = np.asarray(
-            [
-                self.mean[0],
-                self.mean[1],
-                self.mean[2],
-                self.mean[3],
-                self.mean[4],
-                self.mean[5],
-                self.mean[6],
-                self.mean[7],
-                delta_t,
-                1.0 if is_missing else 0.0,
-                float(self.missing_count),
-                float(confidence),
-            ],
-            dtype=np.float32,
-        )
-        self.motion_history.append(feature)
-        self._last_motion_frame = frame_id
 
     @property
     # @jit(nopython=True)
@@ -239,16 +187,6 @@ class BYTETracker(object):
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
-        STrack.motion_history_len = max(
-            int(getattr(args, "xlstm_history_len", DEFAULT_XLSTM_HISTORY_LEN)),
-            int(getattr(args, "ltc_history_len", DEFAULT_XLSTM_HISTORY_LEN)),
-        )
-        if getattr(args, "ltc_motion_ckpt", None):
-            self.motion_predictor = LtcMotionPredictor(args)
-        else:
-            self.motion_predictor = XlstmMotionPredictor(args)
-
-        # ReID
         self.with_reid = getattr(args, "with_reid", False)
         self.reid_weight = getattr(args, "reid_weight", 0.35)
         self.reid_thresh = getattr(args, "reid_thresh", 0.7)
@@ -256,6 +194,7 @@ class BYTETracker(object):
         self.reid_extractor = None
         if self.with_reid:
             self.reid_extractor = build_reid_extractor(args)
+            print(f"[ReID] Loaded | weight={self.reid_weight:.2f} | thresh={self.reid_thresh:.2f} | alpha={self.reid_alpha:.2f}")
 
         # DMA: dynamic motion-appearance fusion
         self.dma = None
@@ -280,19 +219,31 @@ class BYTETracker(object):
     def _fuse_reid(self, iou_dists, tracks, detections):
         if not self.with_reid or iou_dists.size == 0:
             return iou_dists
-        valid_tracks = all(track.smooth_feat is not None for track in tracks)
-        valid_dets = all(det.curr_feat is not None for det in detections)
-        if not valid_tracks or not valid_dets:
+        track_mask = np.array([t.smooth_feat is not None for t in tracks])
+        det_mask = np.array([d.curr_feat is not None for d in detections])
+        if not track_mask.any() or not det_mask.any():
             return iou_dists
         emb_dists = matching.embedding_distance(tracks, detections)
         emb_dists[emb_dists > self.reid_thresh] = 1.0
+
         if self.dma is not None:
-            return self.dma.fuse(
+            fused = self.dma.fuse(
                 tracks, detections,
                 iou_dists, emb_dists,
                 self.kalman_filter, self.frame_id,
             )
-        return (1 - self.reid_weight) * iou_dists + self.reid_weight * emb_dists
+            result = iou_dists.copy()
+            rows = np.where(track_mask)[0]
+            cols = np.where(det_mask)[0]
+            result[np.ix_(rows, cols)] = fused[np.ix_(rows, cols)]
+            return result
+
+        fused = (1 - self.reid_weight) * iou_dists + self.reid_weight * emb_dists
+        result = iou_dists.copy()
+        rows = np.where(track_mask)[0]
+        cols = np.where(det_mask)[0]
+        result[np.ix_(rows, cols)] = fused[np.ix_(rows, cols)]
+        return result
 
     def update(self, output_results, img_info, img_size, frame=None):
         self.frame_id += 1
@@ -342,7 +293,7 @@ class BYTETracker(object):
         ''' Step 2: First association, with high score detection boxes'''
         strack_pool = joint_stracks(tracked_stracks, self.lost_stracks)
         # Predict the current location with KF
-        STrack.multi_predict(strack_pool, self.motion_predictor)
+        STrack.multi_predict(strack_pool)
         dists = matching.iou_distance(strack_pool, detections)
         dists = self._fuse_reid(dists, strack_pool, detections)
         if not self.args.mot20:
@@ -368,6 +319,9 @@ class BYTETracker(object):
             detections_second = []
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
         dists = matching.iou_distance(r_tracked_stracks, detections_second)
+        # dists = self._fuse_reid(dists, strack_pool, detections)
+        # if not self.args.mot20:
+        #     dists = matching.fuse_score(dists, detections)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]
@@ -382,13 +336,8 @@ class BYTETracker(object):
         for it in u_track:
             track = r_tracked_stracks[it]
             if not track.state == TrackState.Lost:
-                track.append_missing_motion(self.frame_id)
                 track.mark_lost()
                 lost_stracks.append(track)
-
-        for track in strack_pool:
-            if track.state == TrackState.Lost:
-                track.append_missing_motion(self.frame_id)
 
         '''Deal with unconfirmed tracks, usually tracks with only one beginning frame'''
         detections = [detections[i] for i in u_detection]
@@ -472,3 +421,4 @@ def remove_duplicate_stracks(stracksa, stracksb):
     resa = [t for i, t in enumerate(stracksa) if not i in dupa]
     resb = [t for i, t in enumerate(stracksb) if not i in dupb]
     return resa, resb
+

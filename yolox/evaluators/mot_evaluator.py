@@ -127,6 +127,9 @@ class MOTEvaluator:
             
         tracker = BYTETracker(self.args)
         ori_thresh = self.args.track_thresh
+        _reid_dataset = getattr(self.dataloader, "dataset", None)
+        _reid_data_dir = getattr(_reid_dataset, "data_dir", None)
+        _reid_split = getattr(_reid_dataset, "name", "")
         for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
             progress_bar(self.dataloader)
         ):
@@ -187,7 +190,12 @@ class MOTEvaluator:
 
             # run tracking
             if outputs[0] is not None:
-                online_targets = tracker.update(outputs[0], info_imgs, self.img_size)
+                if getattr(self.args, "with_reid", False) and _reid_data_dir:
+                    import os as _os
+                    _frame_arg = _os.path.join(_reid_data_dir, _reid_split, img_file_name[0])
+                else:
+                    _frame_arg = None
+                online_targets = tracker.update(outputs[0], info_imgs, self.img_size, _frame_arg)
                 online_tlwhs = []
                 online_ids = []
                 online_scores = []
