@@ -1,0 +1,560 @@
+\documentclass[12pt, a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{geometry}
+\usepackage{amsmath, amssymb, bm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{nicematrix}
+\usepackage{empheq}
+\usepackage{tikz}
+
+\geometry{top=2.5cm, bottom=2.5cm, left=2.8cm, right=2.8cm, headheight=14pt}
+
+% Colors
+\definecolor{primary}{RGB}{30, 90, 160}
+\definecolor{accent}{RGB}{220, 60, 30}
+\definecolor{bg}{RGB}{245, 248, 255}
+\definecolor{bggreen}{RGB}{240, 252, 245}
+\definecolor{bgyellow}{RGB}{255, 252, 235}
+\definecolor{grey}{RGB}{100, 100, 100}
+
+% Section formatting
+\titleformat{\section}[block]
+  {\Large\bfseries\color{primary}}{\thesection.}{0.5em}{}
+  [\vspace{-0.3em}\rule{\linewidth}{1.5pt}]
+
+\titleformat{\subsection}[block]
+  {\large\bfseries\color{primary!80!black}}{\thesubsection.}{0.5em}{}
+
+\titleformat{\subsubsection}[block]
+  {\normalsize\bfseries\color{accent}}{\thesubsubsection.}{0.5em}{}
+
+% Box environments
+\tcbuselibrary{skins, breakable}
+
+\newtcolorbox{definitionbox}[1][]{
+  enhanced, breakable,
+  colback=bg, colframe=primary,
+  fonttitle=\bfseries\color{primary}, title={#1},
+  left=6pt, right=6pt, top=4pt, bottom=4pt,
+  boxrule=1pt, arc=4pt
+}
+
+\newtcolorbox{formulabox}[1][]{
+  enhanced, breakable,
+  colback=bgyellow, colframe=accent,
+  fonttitle=\bfseries\color{accent}, title={#1},
+  left=6pt, right=6pt, top=4pt, bottom=4pt,
+  boxrule=1pt, arc=4pt
+}
+
+\newtcolorbox{notebox}[1][]{
+  enhanced, breakable,
+  colback=bggreen, colframe=green!50!black,
+  fonttitle=\bfseries\color{green!40!black}, title={#1},
+  left=6pt, right=6pt, top=4pt, bottom=4pt,
+  boxrule=1pt, arc=4pt
+}
+
+% Header / footer
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{grey}ByteTrack: Phan tich Toan hoc}
+\fancyhead[R]{\small\color{grey}\today}
+\fancyfoot[C]{\small\color{grey}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% Shortcuts
+\newcommand{\mat}[1]{\mathbf{#1}}
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\T}{^{\top}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\softplus}{\operatorname{softplus}}
+\newcommand{\clip}{\operatorname{clip}}
+
+% =====================================================================
+\begin{document}
+
+% Title page
+\begin{titlepage}
+  \centering\vspace*{2.5cm}
+  {\Huge\bfseries\color{primary} ByteTrack\\[0.4em]
+   \Large Phan tich Toan hoc Chi tiet}\\[1.2em]
+  \rule{\linewidth}{2pt}\\[1em]
+  {\large\color{grey} Baseline (Kalman Filter) \quad vs \quad ByteTrack + LTC}\\[0.8em]
+  \rule{\linewidth}{0.5pt}\\[2em]
+  {\normalsize
+    Source code:\\[0.3em]
+    \texttt{yolox/tracker/kalman\_filter.py}\\
+    \texttt{yolox/tracker/ltc\_motion.py}\\
+    \texttt{yolox/tracker/byte\_tracker.py}}\\[3cm]
+  {\color{grey}\today}
+  \vfill
+\end{titlepage}
+
+\tableofcontents\newpage
+
+% ─────────────────────────────────────────────────────────────────────
+\section{Tong quan kien truc}
+
+ByteTrack la thuat toan multi-object tracking (MOT) su dung \textbf{tat ca} detection boxes
+(ke ca confidence thap) de duy tri tracklet. Pipeline moi frame $t$:
+
+\begin{enumerate}[label=\textbf{\arabic*.}]
+  \item Du doan vi tri tuong lai qua \textbf{motion model} (Kalman hoac Kalman + LTC).
+  \item Ghep noi tracks $\leftrightarrow$ detections bang \textbf{Hungarian algorithm}.
+  \item Cap nhat trang thai Kalman.
+  \item Quan ly vong doi: \textit{Tracked} $\to$ \textit{Lost} $\to$ \textit{Removed}.
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────
+\section{ByteTrack Baseline --- Kalman Filter}
+
+\subsection{Khong gian trang thai (State Space)}
+
+\begin{definitionbox}[Vector trang thai 8 chieu --- \texttt{kalman\_filter.py:29}]
+\[
+  \vect{x} \;=\;
+  \underbrace{\begin{bmatrix} x \\ y \\ a \\ h \end{bmatrix}}_{\text{vi tri}}
+  \;\oplus\;
+  \underbrace{\begin{bmatrix} \dot{x} \\ \dot{y} \\ \dot{a} \\ \dot{h} \end{bmatrix}}_{\text{van toc}}
+  \;\in\; \mathbb{R}^{8}
+\]
+\smallskip
+\begin{tabular}{@{}ll@{}}
+  $(x,\, y)$        & Toa do tam bounding box (pixel) \\[2pt]
+  $a = w/h$         & Aspect ratio (chieu rong / chieu cao) \\[2pt]
+  $h$               & Chieu cao bounding box (pixel) \\[2pt]
+  $(\dot{x}, \dot{y}, \dot{a}, \dot{h})$ & Van toc cua tung thanh phan \\
+\end{tabular}
+\end{definitionbox}
+
+\medskip
+Observation (quan sat duoc tu detector):
+\[
+  \vect{z}_t = \begin{bmatrix} x & y & a & h \end{bmatrix}\T \in \mathbb{R}^4
+\]
+Van toc \textbf{khong quan sat truc tiep} --- phai uoc luong qua Kalman.
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Ma tran chuyen trang thai --- Constant Velocity Model}
+
+\begin{formulabox}[Ma tran chuyen trang thai $\mat{F} \in \mathbb{R}^{8 \times 8}$ --- \texttt{kalman\_filter.py:44--46}]
+\[
+\mat{F} =
+\begin{pNiceMatrix}[first-row, first-col]
+      & x & y & a & h & \dot{x} & \dot{y} & \dot{a} & \dot{h} \\
+x       & 1 & 0 & 0 & 0 & \mathbf{1} & 0 & 0 & 0 \\
+y       & 0 & 1 & 0 & 0 & 0 & \mathbf{1} & 0 & 0 \\
+a       & 0 & 0 & 1 & 0 & 0 & 0 & \mathbf{1} & 0 \\
+h       & 0 & 0 & 0 & 1 & 0 & 0 & 0 & \mathbf{1} \\
+\dot{x} & 0 & 0 & 0 & 0 & 1 & 0 & 0 & 0 \\
+\dot{y} & 0 & 0 & 0 & 0 & 0 & 1 & 0 & 0 \\
+\dot{a} & 0 & 0 & 0 & 0 & 0 & 0 & 1 & 0 \\
+\dot{h} & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 1 \\
+\end{pNiceMatrix}
+\;=\;
+\begin{bmatrix} \mat{I}_4 & \mat{I}_4 \\ \mat{0}_4 & \mat{I}_4 \end{bmatrix}
+\]
+\end{formulabox}
+
+\medskip
+\textbf{Y nghia --- constant velocity:}
+\[
+  x_t = x_{t-1} + \dot{x}_{t-1},\qquad \dot{x}_t = \dot{x}_{t-1}
+\]
+(tuong tu cho $y, a, h$). Ma tran quan sat $\mat{H} \in \mathbb{R}^{4 \times 8}$:
+\[
+  \mat{H} = \begin{bmatrix} \mat{I}_4 & \mat{0}_4 \end{bmatrix}
+  \quad \Rightarrow \quad
+  \vect{z}_t = \mat{H}\,\vect{x}_t + \text{noise}
+\]
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Predict Step}
+
+\begin{formulabox}[Kalman Predict --- \texttt{kalman\_filter.py:88--124}]
+\begin{align}
+  \hat{\vect{x}}_{t \mid t-1} &= \mat{F}\,\hat{\vect{x}}_{t-1 \mid t-1}
+  \label{eq:kf_predict_mean}\\[6pt]
+  \mat{P}_{t \mid t-1} &= \mat{F}\,\mat{P}_{t-1 \mid t-1}\,\mat{F}\T + \mat{Q}_t
+  \label{eq:kf_predict_cov}
+\end{align}
+\end{formulabox}
+
+\medskip
+\textbf{Ma tran nhieu qua trinh} $\mat{Q}_t$ --- adaptive theo chieu cao $h$
+(\texttt{kalman\_filter.py:107--117}):
+\[
+  \mat{Q}_t \;=\; \diag\!\left(
+    \underbrace{\frac{h}{20},\;\frac{h}{20},\;10^{-2},\;\frac{h}{20}}_{\text{nhieu vi tri}},\quad
+    \underbrace{\frac{h}{160},\;\frac{h}{160},\;10^{-5},\;\frac{h}{160}}_{\text{nhieu van toc}}
+  \right)^{\!\odot 2}
+\]
+
+\begin{notebox}[Tai sao scale theo $h$?]
+Doi tuong lon (bounding box cao) di chuyen nhieu pixel hon.
+Scale theo $h$ giup Kalman tu dieu chinh cho moi kich thuoc doi tuong.
+\end{notebox}
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Update Step}
+
+\begin{formulabox}[Kalman Update --- \texttt{kalman\_filter.py:194--226}]
+\textbf{Buoc 1 --- Chieu xuong measurement space:}
+\begin{align}
+  \hat{\vect{z}}_{t} &= \mat{H}\,\hat{\vect{x}}_{t \mid t-1} \\[4pt]
+  \mat{S}_t &= \mat{H}\,\mat{P}_{t \mid t-1}\,\mat{H}\T + \mat{R}_t
+\end{align}
+\textbf{Buoc 2 --- Kalman Gain} (dung Cholesky decomposition):
+\begin{equation}
+  \mat{K}_t \;=\; \mat{P}_{t \mid t-1}\,\mat{H}\T\,\mat{S}_t^{-1}
+\end{equation}
+\textbf{Buoc 3 --- Hieu chinh:}
+\begin{align}
+  \hat{\vect{x}}_{t \mid t} &= \hat{\vect{x}}_{t \mid t-1}
+    + \mat{K}_t \underbrace{(\vect{z}_t - \hat{\vect{z}}_t)}_{\text{innovation}} \\[6pt]
+  \mat{P}_{t \mid t} &= \mat{P}_{t \mid t-1}
+    - \mat{K}_t\,\mat{S}_t\,\mat{K}_t\T
+\end{align}
+\end{formulabox}
+
+\medskip
+\textbf{Ma tran nhieu quan sat} $\mat{R}_t$:
+\[
+  \mat{R}_t = \diag\!\left(\frac{h}{20},\; \frac{h}{20},\; 10^{-1},\; \frac{h}{20}\right)^{\!\odot 2}
+\]
+
+\begin{notebox}[Y nghia cua Kalman Gain $\mat{K}_t$]
+$\mat{K}_t$ can bang giua \textbf{prediction} va \textbf{observation}:
+\begin{itemize}
+  \item $\mat{K}_t \to \mat{0}$: Tin vao prediction (observation nhieu lon)
+  \item $\mat{K}_t \to \mat{H}^{-1}$: Tin vao observation (prediction kem)
+\end{itemize}
+\end{notebox}
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Khoi tao Track}
+
+Khi detection chua duoc ghep voi track nao:
+\[
+  \hat{\vect{x}}_0 = \begin{bmatrix} \vect{z}_0 \\ \vect{0}_4 \end{bmatrix},
+  \qquad
+  \mat{P}_0 = \diag(2\sigma_p h,\;\ldots,\;10\sigma_v h,\;\ldots)^2
+\]
+Van toc khoi tao $= \vect{0}$, covariance van toc lon ($\times 10$) vi chua biet toc do.
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Mahalanobis Gating Distance}
+
+\begin{formulabox}[Gating Distance --- \texttt{kalman\_filter.py:228--268}]
+\[
+  d_M(\vect{z},\, \hat{\vect{x}}) \;=\;
+  \bigl(\vect{z} - \mat{H}\hat{\vect{x}}\bigr)\T
+  \,\mat{S}^{-1}\,
+  \bigl(\vect{z} - \mat{H}\hat{\vect{x}}\bigr)
+  \;\leq\; \chi^2_{4,\,0.95} = 9.4877
+\]
+\end{formulabox}
+
+Nguong lay tu phan phoi chi-square voi $4$ bac tu do o muc tin cay $95\%$.
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Two-Stage Association --- \texttt{byte\_tracker.py:262--291}}
+
+\subsubsection{Vong 1 --- Detections score cao ($s > \tau_{\text{track}}$)}
+\begin{enumerate}[label=\textbf{\arabic*.}]
+  \item \textbf{IoU Distance:}
+    $\displaystyle d_{ij}^{\text{IoU}} = 1 - \text{IoU}(\hat{b}_i,\, b_j)$
+  \item \textbf{Score Fusion:}
+    $\displaystyle d_{ij} = d_{ij}^{\text{IoU}} \cdot (1 - s_j)$
+  \item \textbf{Hungarian Algorithm} voi nguong $\tau_{\text{match}} = 0.8$
+\end{enumerate}
+
+\subsubsection{Vong 2 --- Detections score thap ($0.1 < s < \tau_{\text{track}}$)}
+Chi dung IoU distance thuan, nguong $= 0.5$, cho cac tracks chua ghep.
+
+\begin{notebox}[Y tuong ByteTrack]
+Detections score thap thuong la doi tuong bi che khuat. Khong loai bo ngay
+giup duy tri tracklet qua occlusion.
+\end{notebox}
+
+% ─────────────────────────────────────────────────────────────────────
+\newpage
+\section{ByteTrack + LTC --- Liquid Time-Constant Motion Predictor}
+
+\subsection{Dong luc (Motivation)}
+
+\begin{definitionbox}[Han che cua Kalman Filter thuan]
+\begin{tabular}{@{}ll@{}}
+  \textbf{Van de} & \textbf{Nguyen nhan} \\
+  \midrule
+  Khong mo hinh hoa chuyen dong phi tuyen & Gia dinh constant velocity \\[2pt]
+  Nhay cam voi occlusion keo dai          & Khong dung lich su dai han \\[2pt]
+  $\Delta t$ co dinh = 1                   & Khong xu ly frame gap khong deu \\[2pt]
+  Uncertainty co dinh theo $h$             & Khong hoc duoc tu du lieu \\
+\end{tabular}
+\end{definitionbox}
+
+\medskip
+\textbf{Giai phap:} Huan luyen mang neural (CfC) de hoc \textbf{residual}
+giua Kalman prediction va vi tri thuc te tu lich su quy dao.
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Feature Vector --- Lich su quy dao}
+
+\begin{definitionbox}[Feature vector $\vect{f}_s \in \mathbb{R}^{12}$ --- \texttt{byte\_tracker.py:121--138}]
+\[
+  \vect{f}_s \;=\; \Bigl[
+    \underbrace{x,\; y,\; a,\; h,\; \dot{x},\; \dot{y},\; \dot{a},\; \dot{h}}_{\text{Kalman state (8 chieu)}},\;
+    \underbrace{\Delta t}_{\substack{\text{frame} \\ \text{gap}}},\;
+    \underbrace{\mathbf{1}_{\text{miss}}}_{\substack{\text{dang} \\ \text{bi mat}}},\;
+    \underbrace{c_{\text{miss}}}_{\substack{\text{so frame} \\ \text{mat lien tiep}}},\;
+    \underbrace{s_t}_{\substack{\text{detection} \\ \text{confidence}}}
+  \Bigr]
+\]
+Lich su 16 buoc gan nhat: $\mathcal{H}_t = \{\vect{f}_{t-15},\, \ldots,\, \vect{f}_t\} \in \mathbb{R}^{16 \times 12}$
+\end{definitionbox}
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{CfC Cell --- Closed-form Continuous-time}
+
+\subsubsection{Phuong trinh vi phan lien tuc}
+
+\begin{formulabox}[Liquid Time-Constant ODE]
+\[
+  \tau \;\frac{d\vect{h}}{dt} \;=\; -\,\alpha \odot \vect{h}(t) \;+\; f\bigl(\vect{x}(t),\, \vect{h}(t)\bigr)
+\]
+\begin{tabular}{@{}ll@{}}
+  $\vect{h}(t) \in \mathbb{R}^H$ & Hidden state tai thoi diem $t$ \\[2pt]
+  $\tau \in \mathbb{R}^H_{>0}$ & \textbf{Time constant} --- hang so thoi gian cua moi neuron \\[2pt]
+  $\alpha \in \mathbb{R}^H_{>0}$ & \textbf{Damping coefficient} --- he so tat dan \\[2pt]
+  $f(\cdot)$ & Candidate mapping (phi tuyen) \\
+\end{tabular}
+\end{formulabox}
+
+\subsubsection{Nghiem giai tich (Closed-form Solution) --- \texttt{ltc\_motion.py:17--23}}
+
+Voi buoc thoi gian $\Delta t$, $f$ duoc xap xi hang so:
+
+\begin{empheq}[box=\fbox]{align}
+  \tilde{\vect{h}}_t &= \tanh\!\bigl(\mat{W}_x\,\vect{x}_t + \mat{W}_h\,\vect{h}_{t-1}\bigr)
+  && \text{(candidate state)}
+  \label{eq:cfc_candidate}\\[8pt]
+  \vect{g}_t &= \exp\!\!\left(-\frac{\alpha \odot \Delta t}{\tau}\right)
+  && \text{(time-aware decay gate)}
+  \label{eq:cfc_gate}\\[8pt]
+  \vect{h}_t &= \vect{g}_t \odot \vect{h}_{t-1} \;+\; (1 - \vect{g}_t) \odot \tilde{\vect{h}}_t
+  && \text{(hidden state update)}
+  \label{eq:cfc_update}
+\end{empheq}
+
+\medskip
+$\alpha = \softplus(\hat{\alpha}) + \epsilon$ va
+$\tau = \softplus(\hat{\tau}) + \epsilon$ la cac \textbf{tham so hoc duoc per-neuron}.
+
+\begin{notebox}[Y nghia cua gate $\vect{g}_t$]
+\begin{tabular}{@{}lll@{}}
+  \textbf{Dieu kien} & \textbf{Gia tri} $\vect{g}_t$ & \textbf{Hanh vi} \\
+  \midrule
+  $\Delta t \to 0$ & $\vect{g}_t \to \vect{1}$ & Trang thai hau nhu khong doi \\[2pt]
+  $\Delta t \to \infty$ & $\vect{g}_t \to \vect{0}$ & Hoan toan thay bang candidate \\[2pt]
+  $\Delta t$ binh thuong & $\vect{g}_t \in (0, 1)$ & To hop co trong so \\
+\end{tabular}
+
+\medskip
+Moi neuron co $\tau$ rieng $\to$ hoc duoc \textbf{time scale khac nhau}:
+neuron nhanh ($\tau$ nho) theo doi chuyen dong tuc thoi,
+neuron cham ($\tau$ lon) nam bat xu huong dai han.
+\end{notebox}
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Kien truc LtcMotionResidual --- \texttt{ltc\_motion.py:26--76}}
+
+\subsubsection{Forward Pass qua 2 lop CfC}
+
+\textbf{Buoc 0 --- Chuan hoa dau vao:}
+\[
+  \hat{\mathcal{H}} = \operatorname{LayerNorm}(\mathcal{H}),
+  \qquad
+  \Delta t_s = \mathcal{H}_{s,\,8}
+\]
+
+\textbf{Buoc 1 --- Chay tuan tu qua $T = 16$ buoc, $L = 2$ lop:}
+\begin{align}
+  \vect{h}_s^{(0)} &= \operatorname{CfC}^{(0)}\!\bigl(\hat{\vect{f}}_s,\; \vect{h}_{s-1}^{(0)},\; \Delta t_s\bigr) \\[4pt]
+  \vect{h}_s^{(1)} &= \operatorname{CfC}^{(1)}\!\bigl(\vect{h}_s^{(0)},\; \vect{h}_{s-1}^{(1)},\; \Delta t_s\bigr)
+\end{align}
+Khoi tao: $\vect{h}_0^{(l)} = \vect{0}$.
+
+\textbf{Buoc 2 --- Output head:}
+\[
+  \mathbb{R}^H \xrightarrow{\text{LayerNorm}}
+  \mathbb{R}^H \xrightarrow{\text{Linear}}
+  \mathbb{R}^H \xrightarrow{\text{GELU}}
+  \mathbb{R}^H \xrightarrow{\text{Linear}}
+  \mathbb{R}^{8}
+  \quad \Rightarrow \quad
+  \begin{bmatrix} \vect{r} \\ \log\vect{v} \end{bmatrix},
+  \quad \vect{r}, \log\vect{v} \in \mathbb{R}^4
+\]
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Residual Refinement --- \texttt{ltc\_motion.py:128--161}}
+
+\subsubsection{Denormalize residual}
+\[
+  \vect{r}_{\text{final}} = \vect{r} \odot \bm{\sigma}^* + \bm{\mu}^*
+  \qquad
+  \vect{r}_{\text{clipped}} = \clip(\vect{r}_{\text{final}},\; -256,\; +256)
+\]
+
+\subsubsection{Variance tu log}
+\[
+  \vect{v} = \exp\!\Bigl(\clip(\log\vect{v},\; -10,\; +10)\Bigr) \odot (\bm{\sigma}^*)^{\odot 2}
+\]
+
+\subsubsection{Hieu chinh mean va covariance}
+
+\begin{formulabox}[Kalman State Refinement]
+\textbf{Hieu chinh mean} (chi 4 thanh phan vi tri):
+\[
+  \hat{\vect{x}}_{t \mid t-1}^{\text{refined}} \;=\;
+  \hat{\vect{x}}_{t \mid t-1} \;+\;
+  \begin{bmatrix} \vect{r}_{\text{clipped}} \\ \vect{0}_4 \end{bmatrix}
+\]
+
+\textbf{Hieu chinh covariance} (tang uncertainty khi model khong chac):
+\[
+  \mat{P}_{t \mid t-1}^{\text{refined}} \;=\;
+  \mat{P}_{t \mid t-1} \;+\;
+  \lambda_{\text{cov}} \cdot \diag(\vect{v},\; \vect{0}_4)
+\]
+voi $\lambda_{\text{cov}}$ = \texttt{covariance\_scale}.
+\end{formulabox}
+
+\begin{notebox}[Co che tu dieu chinh]
+Khi model khong chac ve residual ($\vect{v}$ lon),
+covariance $\mat{P}$ tang $\Rightarrow$ Kalman gain $\mat{K}$ tang $\Rightarrow$
+Update step \textbf{tin vao observation hon prediction}.
+\end{notebox}
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Muc tieu huan luyen (Training Objective)}
+
+Model du doan \textbf{residual giua Kalman prediction va vi tri thuc}:
+\[
+  \vect{\delta}^* = \vect{x}_{\text{true}} - \hat{\vect{x}}_{\text{Kalman}}
+\]
+
+\begin{formulabox}[Gaussian Negative Log-Likelihood Loss]
+\[
+  \mathcal{L} \;=\; \frac{1}{2} \sum_{i=1}^{4} \left[
+    \log v_i \;+\; \frac{(r_i - \delta^*_i)^2}{v_i}
+  \right]
+\]
+\end{formulabox}
+
+Ham loss nay dong thoi:
+\begin{itemize}
+  \item Toi thieu hoa sai so du doan $(r_i - \delta^*_i)^2$.
+  \item Calibrate variance $v_i$: neu kho du doan, model tang $v_i$ (trung thuc ve uncertainty).
+\end{itemize}
+
+% ─────────────────────────────────────────────────────────────────────
+\newpage
+\section{So sanh Tong hop}
+
+\begin{table}[h!]
+\centering
+\renewcommand{\arraystretch}{1.6}
+\begin{tabular}{>{\bfseries}p{3.2cm} p{5cm} p{5.5cm}}
+  \toprule
+  Khia canh & Kalman Baseline & ByteTrack + LTC \\
+  \midrule
+  Motion model
+    & Constant velocity (tuyen tinh)
+    & CfC ODE (phi tuyen, hoc tu data) \\
+  Xu ly thoi gian
+    & $\Delta t = 1$ co dinh
+    & $\Delta t$ bien doi qua time constant $\tau$ \\
+  Lich su su dung
+    & Khong (Markov)
+    & 16 buoc $\times$ 12 features \\
+  Occlusion
+    & Van toc ve 0 khi \textit{Lost}
+    & Feature \texttt{is\_missing}, \texttt{missing\_count} \\
+  Uncertainty
+    & Co dinh theo $h$
+    & Variance $\vect{v}$ adaptive (hoc duoc) \\
+  Dau ra
+    & $\hat{\vect{x}},\; \mat{P}$
+    & $\hat{\vect{x}} + \vect{r},\; \mat{P} + \lambda\mat{V}$ \\
+  Khi nao ap dung
+    & Luc nao cung
+    & Khi track co $\geq$ \texttt{min\_history} buoc \\
+  \bottomrule
+\end{tabular}
+\caption{So sanh Kalman Filter baseline va ByteTrack + LTC}
+\end{table}
+
+% ─────────────────────────────────────────────────────────────────────
+\subsection{Ket luan}
+
+\begin{notebox}[Diem mau chot]
+LTC \textbf{khong thay the} Kalman Filter --- no la mot \textbf{post-hoc corrector}
+chay sau predict step. Kalman van dam nhan tinh toan uncertainty (covariance),
+con LTC bo sung kien thuc ve trajectory patterns ma Gaussian noise model
+khong nam bat duoc.
+\end{notebox}
+
+% ─────────────────────────────────────────────────────────────────────
+\section{Bang Ky hieu}
+
+\begin{table}[h!]
+\centering
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{@{}ll@{}}
+  \toprule
+  \textbf{Ky hieu} & \textbf{Y nghia} \\
+  \midrule
+  $\vect{x}_t \in \mathbb{R}^8$     & Vector trang thai Kalman \\
+  $\vect{z}_t \in \mathbb{R}^4$     & Observation tu detector \\
+  $\mat{F}$                          & Ma tran chuyen trang thai \\
+  $\mat{H}$                          & Ma tran quan sat \\
+  $\mat{Q}_t,\, \mat{R}_t$           & Nhieu qua trinh / nhieu quan sat \\
+  $\mat{P}_t$                        & Covariance matrix \\
+  $\mat{K}_t$                        & Kalman Gain \\
+  $d_M$                              & Mahalanobis distance (gating) \\
+  $\vect{h}_t^{(l)} \in \mathbb{R}^H$ & Hidden state lop $l$ cua CfC \\
+  $\tau,\, \alpha \in \mathbb{R}^H$ & Time constant va damping (learned) \\
+  $\vect{g}_t \in (0,1)^H$          & Time-aware decay gate \\
+  $\vect{r} \in \mathbb{R}^4$        & Predicted residual tu LTC \\
+  $\vect{v} \in \mathbb{R}^4$        & Predicted variance tu LTC \\
+  $\mathcal{H}_t \in \mathbb{R}^{16 \times 12}$ & Lich su quy dao 16 buoc \\
+  $\lambda_{\text{cov}}$             & Covariance scale hyperparameter \\
+  $\odot$                            & Hadamard product (nhan theo phan tu) \\
+  $\chi^2_{k,\,p}$                   & Nguong chi-square $k$ bac tu do, muc $p$ \\
+  \bottomrule
+\end{tabular}
+\caption{Bang ky hieu su dung trong tai lieu}
+\end{table}
+
+\vfill
+\begin{center}
+\small\color{grey}
+Tai lieu duoc tao tu phan tich source code project ByteTrack + LTC.
+\end{center}
+
+\end{document}
