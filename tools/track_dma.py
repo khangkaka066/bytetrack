@@ -1,15 +1,16 @@
-from loguru import logger
-
 import os
 import sys
-import torch
-import torch.backends.cudnn as cudnn
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 FILE = os.path.abspath(__file__)
 ROOT = os.path.dirname(os.path.dirname(FILE))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+from loguru import logger
+
+import torch
+import torch.backends.cudnn as cudnn
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from yolox.core import launch
 from yolox.exp import get_exp
@@ -20,97 +21,9 @@ import argparse
 import random
 import warnings
 import glob
-import numpy as np
 import motmetrics as mm
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from pathlib import Path
-
-# from yolox.xlstm.xlstm_motion import XlstmMotionPredictor
-from yolox.xlstm.xlstm_motion import XlstmMotionPredictor
-from yolox.xlstm.byte_tracker_slstm import BYTETrackerSLSTM
-# from yolox.xlstm.byte_tracker_slstm import BYTETrackerSLSTM
-from yolox.tracker.byte_tracker import STrack
-from yolox.evaluators import mot_evaluator
-
-if not hasattr(np, "asfarray"):
-    np.asfarray = lambda a, dtype=float: np.asarray(a, dtype=dtype)
-
-
-def _track_xyah(track):
-    if track.mean is not None:
-        return np.asarray(track.mean[:4], dtype=np.float32)
-    return np.asarray(track.to_xyah(), dtype=np.float32)
-
-
-def _fit_motion_feature(feature, input_dim):
-    feature = np.asarray(feature, dtype=np.float32)
-    if feature.shape[0] == input_dim:
-        return feature
-    if feature.shape[0] > input_dim:
-        return feature[:input_dim]
-    return np.pad(feature, (0, input_dim - feature.shape[0]), mode="constant")
-
-
-def _append_xlstm_motion_history(track, input_dim, missed=0.0):
-    if track.mean is None:
-        return
-
-    if not hasattr(track, "motion_history"):
-        track.motion_history = deque(maxlen=getattr(STrack, "_xlstm_history_len", 16))
-
-    xyah = _track_xyah(track)
-    last_xyah = getattr(track, "_xlstm_last_xyah", None)
-    velocity = np.zeros(4, dtype=np.float32) if last_xyah is None else xyah - last_xyah
-    state_value = float(getattr(track.state, "value", track.state))
-    feature = np.concatenate(
-        [
-            xyah,
-            velocity,
-            np.asarray(
-                [
-                    float(getattr(track, "score", 0.0)),
-                    float(getattr(track, "tracklet_len", 0)),
-                    float(missed),
-                    state_value,
-                ],
-                dtype=np.float32,
-            ),
-        ]
-    )
-    track.motion_history.append(_fit_motion_feature(feature, input_dim))
-    track._xlstm_last_xyah = xyah
-
-
-def _install_xlstm_motion(args):
-    if args.xlstm_motion_ckpt:
-        logger.info(
-            "xLSTM motion checkpoint will be loaded by BYTETracker from {}".format(
-                args.xlstm_motion_ckpt
-            )
-        )
-    elif not getattr(args, "ltc_motion_ckpt", None):
-        logger.info("xLSTM/LTC motion checkpoint not provided; using pure Kalman prediction.")
-    return None
-
-
-def _install_slstm_tracker(args):
-    if not args.slstm_ckpt:
-        return
-
-    def build_slstm_tracker(tracker_args, frame_rate=30):
-        return BYTETrackerSLSTM(
-            tracker_args,
-            frame_rate=frame_rate,
-            slstm_ckpt=args.slstm_ckpt,
-            vocab_size=args.slstm_vocab_size,
-            context_length=args.slstm_context_length,
-            alpha0=args.slstm_alpha0,
-            beta=args.slstm_beta,
-            device=args.xlstm_device,
-        )
-
-    mot_evaluator.BYTETracker = build_slstm_tracker
-    logger.info("Using BYTETrackerSLSTM with checkpoint {}".format(args.slstm_ckpt))
 
 
 def make_parser():
@@ -290,13 +203,6 @@ def main(exp, args, num_gpu):
 
     setup_logger(file_name, distributed_rank=rank, filename="val_log.txt", mode="a")
     logger.info("Args: {}".format(args))
-
-    if (args.slstm_ckpt or args.xlstm_motion_ckpt) and args.xlstm_device is None and torch.cuda.is_available():
-        args.xlstm_device = "cuda:{}".format(rank)
-    if args.ltc_motion_ckpt and args.ltc_device is None and torch.cuda.is_available():
-        args.ltc_device = "cuda:{}".format(rank)
-    _install_slstm_tracker(args)
-    _install_xlstm_motion(args)
 
     if args.conf is not None:
         exp.test_conf = args.conf
